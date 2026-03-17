@@ -152,17 +152,16 @@ bb server:status             # check if running
 
 ## Known Limitations (v0.2.0)
 
-**Bearer tokens only — no requester binding.** Current tokens are bearer tokens: whoever holds the token can use it. There is no proof-of-possession — if a token leaks, anyone can use it.
+**Bearer tokens only (currently).** The proxy currently uses bearer tokens — whoever holds the token can use it. Stroopwafel 0.8.0 now supports requester-bound tokens via signed requests, but this is not yet wired into the proxy middleware.
 
-What's needed for requester-bound tokens:
+**Requester-bound tokens** (available in stroopwafel 0.8.0, proxy integration planned for Phase 5):
 - Token carries `[:authorized-agent-key <agent-public-key>]` — bound to a specific agent's Ed25519 key
-- Agent signs each request (route, params, nonce) with its private key
-- Proxy verifies the request signature matches the key in the token
-- This is the signed-request model from the stroopwafel design docs (SPKI's subject-key binding expressed as Datalog facts)
+- Agent signs each request with its private key via `stroopwafel.request/sign-request`
+- Proxy verifies signature via `stroopwafel.request/verify-request`, then Datalog join confirms the key matches
+- Stolen token is useless without the agent's private key
+- This is SPKI's subject-key binding model expressed as Datalog facts
 
-This requires enhancing stroopwafel itself to support holder binding / proof-of-possession. Tracked as a stroopwafel enhancement + alpaca-clj Phase 5 item.
-
-Current mitigations: tokens are sealed (can't expand authority), sessions should be short-lived, and the proxy logs every request with the token's revocation ID for audit.
+Current mitigations: tokens are sealed (can't expand authority), sessions should be short-lived, and the proxy logs every request for audit.
 
 ## Key Design Decisions
 
@@ -179,7 +178,7 @@ Current mitigations: tokens are sealed (can't expand authority), sessions should
 | [http-kit](https://github.com/http-kit/http-kit) | 2.8.1 | HTTP server + client |
 | [cheshire](https://github.com/dakrone/cheshire) | 6.1.0 | JSON (Alpaca REST) |
 | [cedn](https://github.com/franks42/canonical-edn) | 1.2.0 | Canonical EDN serialization |
-| [stroopwafel](https://github.com/franks42/stroopwafel) | 0.7.0 | Capability token auth |
+| [stroopwafel](https://github.com/franks42/stroopwafel) | 0.8.0 | Capability token auth (requester binding available) |
 | [trove](https://github.com/taoensso/trove) | 1.1.0 | Structured logging |
 | [timbre](https://github.com/taoensso/timbre) | 6.8.0 | Logging backend |
 
