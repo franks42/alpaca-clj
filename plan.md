@@ -34,30 +34,30 @@ CLI (bb tasks)                    HTTP clients / LLM agents
 
 ## Milestones
 
-### Phase 0 — Project Skeleton **[DONE]**
-- [x] `bb.edn` with deps (http-kit, cedn, cheshire)
+### Phase 0 — Project Skeleton **[DONE — v0.1.0]**
+- [x] `bb.edn` with deps (http-kit 2.8.1, cheshire 6.1.0, cedn 1.2.0, trove 1.1.0, timbre 6.8.0)
 - [x] `CLAUDE.md` with conventions
-- [x] Directory structure: `src/alpaca/{config,client,schema}.clj`, `src/alpaca/proxy/{server,router,middleware,handlers}.clj`
-- [x] Schema definition (single source of truth for 5 read-only operations)
-- [x] bb tasks: `server:start`, `account`, `market`, `trading`
-- [x] Basic http-kit server starts and returns 404/405 for unknown routes/methods
-- [x] CLI scripts: `src/alpaca/cli/{common,account,market,trading}.clj`
+- [x] Directory structure: `src/alpaca/{config,client,schema,keys,telemetry}.clj`, `src/alpaca/proxy/{server,router,middleware,handlers,log}.clj`
+- [x] Schema definition (single source of truth with descriptions, param specs, effect classes)
+- [x] Server lifecycle: `bb server:start/stop/restart/status` (PID file)
+- [x] API discovery: `GET /api` returns full schema as EDN
 - [x] Health endpoint: `GET /health`
-- [x] clj-kondo 0 errors 0 warnings, cljfmt clean
+- [x] Structural whitelist: 404 unknown route, 405 wrong method
 
-### Phase 1 — Read-Only APIs (Zero Financial Risk) **[DONE]**
+### Phase 1 — Read-Only APIs (Zero Financial Risk) **[DONE — v0.1.0]**
 - [x] `GET  /account/info`       → Alpaca `GET /v2/account`
 - [x] `GET  /market/clock`       → Alpaca `GET /v2/clock`
 - [x] `POST /market/quote`       → Alpaca `GET /v2/stocks/{symbol}/quotes/latest`
 - [x] `POST /market/bars`        → Alpaca `GET /v2/stocks/bars` (`:param-map {:symbol :symbols}`)
 - [x] `GET  /trading/positions`  → Alpaca `GET /v2/positions`
-- [x] Alpaca client layer (JSON HTTP calls with API key auth)
-- [x] EDN request/response on proxy boundary
+- [x] Key expansion: terse Alpaca keys → readable names (bid-price, open, high, etc.)
+- [x] Alpaca client layer (JSON internally, EDN at boundary)
 - [x] Simple auth: `PROXY_TOKEN` env var (disabled when unset)
-- [x] bb CLI tasks: `bb account info`, `bb market clock`, `bb market quote`, `bb market bars`, `bb trading positions`
-- [x] End-to-end: all 5 endpoints verified against Alpaca paper trading
-- [x] Structural whitelist: 404 unknown route, 405 wrong method
+- [x] Unified CLI: `bb api <operation> [--flags]`, convenience aliases
+- [x] Telemetry: taoensso trove/timbre, structured logging to stderr, request timing
+- [x] All 5 endpoints verified against Alpaca paper trading
 - [x] clj-kondo 0 errors 0 warnings, cljfmt clean
+- [x] Committed `aab2853`, tagged `v0.1.0`, pushed
 
 ### Phase 2 — Stroopwafel Integration
 - [ ] Middleware: verify `Authorization: Bearer <token>` via Stroopwafel
@@ -131,4 +131,4 @@ CLI (bb tasks)                    HTTP clients / LLM agents
 
 ---
 
-*Status: Phase 0 + Phase 1 complete. Phase 2 (Stroopwafel integration) next.*
+*Status: Phase 0+1 complete (v0.1.0). Phase 2 (Stroopwafel integration) next.*
