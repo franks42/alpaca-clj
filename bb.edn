@@ -2,7 +2,8 @@
         cheshire/cheshire        {:mvn/version "6.1.0"}
         com.github.franks42/cedn {:mvn/version "1.2.0"}
         com.taoensso/trove       {:mvn/version "1.1.0"}
-        com.taoensso/timbre      {:mvn/version "6.8.0"}}
+        com.taoensso/timbre      {:mvn/version "6.8.0"}
+        com.github.franks42/stroopwafel {:mvn/version "0.7.0"}}
 
  :paths ["src"]
 
@@ -48,6 +49,15 @@
   api
   {:doc "Call proxy API: bb api <operation> [--key val ...]"
    :task (apply shell "bb" "-m" "alpaca.cli.api"
+                *command-line-args*)}
+
+  ;; ==========================================================================
+  ;; Token Management
+  ;; ==========================================================================
+
+  token
+  {:doc "Token commands: bb token <generate-keys|issue-read-only|issue|inspect>"
+   :task (apply shell "bb" "-m" "alpaca.cli.token"
                 *command-line-args*)}
 
   ;; Convenience aliases — shorthand for common operations

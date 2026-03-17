@@ -33,7 +33,8 @@
      body   — EDN map (for POST) or nil"
   [method path body]
   (let [url     (str (proxy-url) path)
-        token   (System/getenv "PROXY_TOKEN")
+        token   (or (System/getenv "STROOPWAFEL_TOKEN")
+                    (System/getenv "PROXY_TOKEN"))
         headers (cond-> {"Accept" "application/edn"}
                   token (assoc "Authorization" (str "Bearer " token))
                   body  (assoc "Content-Type" "application/edn"))

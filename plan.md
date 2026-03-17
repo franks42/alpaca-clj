@@ -59,14 +59,21 @@ CLI (bb tasks)                    HTTP clients / LLM agents
 - [x] clj-kondo 0 errors 0 warnings, cljfmt clean
 - [x] Committed `aab2853`, tagged `v0.1.0`, pushed
 
-### Phase 2 — Stroopwafel Integration **[BLOCKED — stroopwafel needs bb port]**
-Stroopwafel is JVM-only (java.security.* crypto). Needs Phase 4 (.cljc cross-platform) in ../stroopwafel before this can proceed.
-- [ ] Middleware: verify `Authorization: Bearer <token>` via Stroopwafel
-- [ ] Route + EDN body → Datalog fact translation
-- [ ] Policy evaluation (allow/deny with explain)
-- [ ] `bb token issue-read-only` — mint read-only capability token
-- [ ] CLI uses `STROOPWAFEL_TOKEN` env var
-- [ ] Deny → 403 with explanation
+### Phase 2 — Stroopwafel Integration **[DONE — v0.2.0]**
+Stroopwafel 0.7.0 runs on bb. Token auth fully integrated.
+- [x] `alpaca.auth` namespace: token issue, serialize (CEDN), verify, authorize
+- [x] `wrap-stroopwafel-auth` middleware: verify signature + evaluate Datalog checks
+- [x] Auth checks: `:effect` and `:domain` facts injected per request
+- [x] `/health` and `/api` exempt from auth
+- [x] `bb token generate-keys` — generate root Ed25519 keypair
+- [x] `bb token issue-read-only` — issue sealed read-only token (all domains)
+- [x] `bb token issue --effects read,write --domains market,account` — custom tokens
+- [x] `bb token inspect <token>` — show token contents
+- [x] CLI uses `STROOPWAFEL_TOKEN` env var (falls back to `PROXY_TOKEN`)
+- [x] Without token → 401; invalid token → 403; valid token → proxy to Alpaca
+- [x] Telemetry: trove/timbre with proper stderr routing (System/err via backend)
+- [x] Auth mode auto-detected: `STROOPWAFEL_ROOT_KEY` → stroopwafel, `PROXY_TOKEN` → simple, neither → none
+- [x] clj-kondo 0 errors 0 warnings, cljfmt clean
 
 ### Phase 3 — Write APIs (Paper Trading)
 - [ ] `POST /trade/place-order`     → Alpaca `POST /v2/orders`      (write)
@@ -132,4 +139,4 @@ Stroopwafel is JVM-only (java.security.* crypto). Needs Phase 4 (.cljc cross-pla
 
 ---
 
-*Status: Phase 0+1 complete (v0.1.0). Phase 2 blocked on stroopwafel bb port. Phase 3 can proceed independently.*
+*Status: Phase 0+1+2 complete (v0.2.0). Phase 3 (write APIs) next.*

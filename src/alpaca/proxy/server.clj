@@ -7,6 +7,7 @@
             [alpaca.telemetry :as telemetry]
             [alpaca.config :as config]
             [alpaca.schema :as schema]
+            [alpaca.auth :as auth]
             [alpaca.proxy.router :as router]
             [alpaca.proxy.middleware :as mw]))
 
@@ -48,9 +49,19 @@
   (let [config     (merge (config/load-config) config-override)
         port       (or port (:proxy-port config))
         host       (or host (:proxy-host config))
+        auth-mode  (cond
+                     (:stroopwafel-root-key config) :stroopwafel
+                     (:proxy-token config)          :token
+                     :else                          :none)
         handler    (-> (router/create-router config)
                        (mw/wrap-edn-content-type)
-                       (mw/wrap-simple-auth (:proxy-token config))
+                       (cond->
+                        (= auth-mode :stroopwafel)
+                         (mw/wrap-stroopwafel-auth
+                          (auth/import-public-key (:stroopwafel-root-key config)))
+
+                         (= auth-mode :token)
+                         (mw/wrap-simple-auth (:proxy-token config)))
                        (mw/wrap-request-logging)
                        (mw/wrap-error-handler))
         http-server (http/run-server handler
@@ -75,7 +86,7 @@
                :data  {:host  host
                        :port  actual-port
                        :paper (:paper? config)
-                       :auth  (if (:proxy-token config) :token :none)
+                       :auth  auth-mode
                        :routes (mapv (fn [op]
                                        {:route  (:route op)
                                         :method (name (:method op))
