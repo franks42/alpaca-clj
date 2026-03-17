@@ -59,7 +59,8 @@ CLI (bb tasks)                    HTTP clients / LLM agents
 - [x] clj-kondo 0 errors 0 warnings, cljfmt clean
 - [x] Committed `aab2853`, tagged `v0.1.0`, pushed
 
-### Phase 2 — Stroopwafel Integration
+### Phase 2 — Stroopwafel Integration **[BLOCKED — stroopwafel needs bb port]**
+Stroopwafel is JVM-only (java.security.* crypto). Needs Phase 4 (.cljc cross-platform) in ../stroopwafel before this can proceed.
 - [ ] Middleware: verify `Authorization: Bearer <token>` via Stroopwafel
 - [ ] Route + EDN body → Datalog fact translation
 - [ ] Policy evaluation (allow/deny with explain)
@@ -131,4 +132,4 @@ CLI (bb tasks)                    HTTP clients / LLM agents
 
 ---
 
-*Status: Phase 0+1 complete (v0.1.0). Phase 2 (Stroopwafel integration) next.*
+*Status: Phase 0+1 complete (v0.1.0). Phase 2 blocked on stroopwafel bb port. Phase 3 can proceed independently.*
