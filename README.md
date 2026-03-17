@@ -150,6 +150,20 @@ bb server:restart             # stop + start
 bb server:status             # check if running
 ```
 
+## Known Limitations (v0.2.0)
+
+**Bearer tokens only — no requester binding.** Current tokens are bearer tokens: whoever holds the token can use it. There is no proof-of-possession — if a token leaks, anyone can use it.
+
+What's needed for requester-bound tokens:
+- Token carries `[:authorized-agent-key <agent-public-key>]` — bound to a specific agent's Ed25519 key
+- Agent signs each request (route, params, nonce) with its private key
+- Proxy verifies the request signature matches the key in the token
+- This is the signed-request model from the stroopwafel design docs (SPKI's subject-key binding expressed as Datalog facts)
+
+This requires enhancing stroopwafel itself to support holder binding / proof-of-possession. Tracked as a stroopwafel enhancement + alpaca-clj Phase 5 item.
+
+Current mitigations: tokens are sealed (can't expand authority), sessions should be short-lived, and the proxy logs every request with the token's revocation ID for audit.
+
 ## Key Design Decisions
 
 - **Schema as single source of truth** — one Clojure data structure defines all operations. Router, CLI, Datalog predicates, and API discovery are all derived from it.
