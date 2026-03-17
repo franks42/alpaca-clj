@@ -1,0 +1,74 @@
+{:deps {http-kit/http-kit        {:mvn/version "2.8.1"}
+        cheshire/cheshire        {:mvn/version "6.1.0"}
+        com.github.franks42/cedn {:mvn/version "1.2.0"}
+        com.taoensso/trove       {:mvn/version "1.1.0"}
+        com.taoensso/timbre      {:mvn/version "6.8.0"}}
+
+ :paths ["src"]
+
+ :tasks
+ {;; ==========================================================================
+  ;; Quality
+  ;; ==========================================================================
+
+  lint {:doc "Lint code with clj-kondo"
+        :task (shell "clj-kondo" "--lint" "src" "test")}
+
+  fmt {:doc "Check formatting with cljfmt"
+       :task (shell "cljfmt" "check" "src" "test")}
+
+  fmt:fix {:doc "Fix formatting with cljfmt"
+           :task (shell "cljfmt" "fix" "src" "test")}
+
+  test {:doc "Run tests"
+        :task (shell "bb" "-m" "alpaca.test-runner")}
+
+  ;; ==========================================================================
+  ;; Server
+  ;; ==========================================================================
+
+  server:start {:doc "Start proxy server (default port 8080)"
+                :task (apply shell "bb" "-m" "alpaca.proxy.server"
+                             *command-line-args*)}
+
+  server:stop {:doc "Stop running proxy server"
+               :task (shell "bb" "-m" "alpaca.proxy.server" "stop")}
+
+  server:restart {:doc "Restart proxy server"
+                  :task (apply shell "bb" "-m" "alpaca.proxy.server" "restart"
+                               *command-line-args*)}
+
+  server:status {:doc "Check if proxy server is running"
+                 :task (shell "bb" "-m" "alpaca.proxy.server" "status")}
+
+  ;; ==========================================================================
+  ;; API — all calls go through the proxy
+  ;; ==========================================================================
+
+  api
+  {:doc "Call proxy API: bb api <operation> [--key val ...]"
+   :task (apply shell "bb" "-m" "alpaca.cli.api"
+                *command-line-args*)}
+
+  ;; Convenience aliases — shorthand for common operations
+  account
+  {:doc "bb account info"
+   :task (apply shell "bb" "-m" "alpaca.cli.api"
+                (str "account/" (or (first *command-line-args*) "info"))
+                (rest *command-line-args*))}
+
+  market
+  {:doc "bb market <clock|quote|bars> [--symbol SYM]"
+   :task (let [[cmd & args] *command-line-args*]
+           (if cmd
+             (apply shell "bb" "-m" "alpaca.cli.api"
+                    (str "market/" cmd) args)
+             (println "Usage: bb market <clock|quote|bars> [--symbol SYM]")))}
+
+  trading
+  {:doc "bb trading <positions> [--symbol SYM]"
+   :task (let [[cmd & args] *command-line-args*]
+           (if cmd
+             (apply shell "bb" "-m" "alpaca.cli.api"
+                    (str "trading/" cmd) args)
+             (println "Usage: bb trading <positions>")))}}}
