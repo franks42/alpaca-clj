@@ -64,11 +64,21 @@
      {}
      renamed)))
 
+(defn- body-params
+  "Return params that are NOT path interpolations — these go as JSON body.
+   For POST/DELETE with body. Removes nil values."
+  [params alpaca-spec]
+  (let [path-keys (path-params (:path alpaca-spec))]
+    (->> params
+         (remove (fn [[k _]] (contains? path-keys k)))
+         (remove (fn [[_ v]] (nil? v)))
+         (into {}))))
+
 (defn request!
   "Make a request to the Alpaca REST API.
 
    Arguments:
-     alpaca-spec — {:method :get/:post, :base :trading/:data, :path \"/v2/...\"}
+     alpaca-spec — {:method :get/:post/:delete, :base :trading/:data, :path \"/v2/...\"}
      params      — EDN map of request parameters
      config      — (optional) config map, defaults to (config/load-config)
 
@@ -81,19 +91,37 @@
          path    (interpolate-path (:path alpaca-spec) params)
          url     (str base path)
          method  (:method alpaca-spec)
-         qparams (when (= method :get)
-                   (query-params params alpaca-spec))
          headers {"APCA-API-KEY-ID"     (:api-key-id config)
                   "APCA-API-SECRET-KEY" (:api-secret-key config)
                   "Accept"              "application/json"}
-         opts    (cond-> {:headers headers}
-                   (seq qparams) (assoc :query-params qparams))
+         opts    (case method
+                   :get
+                   (let [qp (query-params params alpaca-spec)]
+                     (cond-> {:headers headers}
+                       (seq qp) (assoc :query-params qp)))
+
+                   :post
+                   (let [body (body-params params alpaca-spec)]
+                     {:headers (assoc headers "Content-Type" "application/json")
+                      :body    (json/generate-string body)})
+
+                   :delete
+                   (let [body (body-params params alpaca-spec)]
+                     (cond-> {:headers headers}
+                       (seq body) (assoc :headers (assoc headers "Content-Type" "application/json")
+                                         :body (json/generate-string body)))))
          resp    @(http/request (merge opts {:method method :url url}))]
      (if (<= 200 (:status resp) 299)
-       (when-let [body (:body resp)]
-         (json/parse-string body keyword))
-       (throw (ex-info (str "Alpaca API error: " (:status resp))
-                       {:status (:status resp)
-                        :body   (try (json/parse-string (:body resp) keyword)
-                                     (catch Exception _ (:body resp)))
-                        :url    url}))))))
+       (let [body-str (if (string? (:body resp))
+                        (:body resp)
+                        (some-> (:body resp) slurp))]
+         (when (and body-str (not (empty? body-str)))
+           (json/parse-string body-str keyword)))
+       (let [body-str (if (string? (:body resp))
+                        (:body resp)
+                        (some-> (:body resp) slurp))]
+         (throw (ex-info (str "Alpaca API error: " (:status resp))
+                         {:status (:status resp)
+                          :body   (try (json/parse-string body-str keyword)
+                                       (catch Exception _ body-str))
+                          :url    url})))))))

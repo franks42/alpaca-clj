@@ -75,15 +75,18 @@ Stroopwafel 0.7.0 runs on bb. Token auth fully integrated.
 - [x] Auth mode auto-detected: `STROOPWAFEL_ROOT_KEY` → stroopwafel, `PROXY_TOKEN` → simple, neither → none
 - [x] clj-kondo 0 errors 0 warnings, cljfmt clean
 
-### Phase 3 — Write APIs (Paper Trading)
-- [ ] `POST /trade/place-order`     → Alpaca `POST /v2/orders`      (write)
-- [ ] `GET  /trade/orders`          → Alpaca `GET  /v2/orders`       (read)
-- [ ] `POST /trade/order`           → Alpaca `GET  /v2/orders/{id}`  (read)
-- [ ] `POST /trade/cancel-order`    → Alpaca `DELETE /v2/orders/{id}` (destroy)
-- [ ] `POST /trade/close-position`  → Alpaca `DELETE /v2/positions/{symbol}` (destroy)
-- [ ] Token facts: allowed symbols, side, type, max qty
-- [ ] bb CLI tasks for each operation
-- [ ] End-to-end: place a paper limit order, query it, cancel it
+### Phase 3 — Write APIs (Paper Trading) **[DONE — v0.3.0]**
+- [x] `POST /trade/place-order`     → Alpaca `POST /v2/orders`      (write)
+- [x] `POST /trade/orders`          → Alpaca `GET  /v2/orders`       (read)
+- [x] `POST /trade/order`           → Alpaca `GET  /v2/orders/{id}`  (read)
+- [x] `POST /trade/cancel-order`    → Alpaca `DELETE /v2/orders/{id}` (destroy)
+- [x] `POST /trade/close-position`  → Alpaca `DELETE /v2/positions/{symbol}` (destroy)
+- [x] Alpaca client: POST (JSON body) and DELETE methods
+- [x] bb CLI tasks for all operations (via schema-driven `bb api`)
+- [x] End-to-end: place limit order → query → cancel (paper trading)
+- [x] Auth: read-only token → 403 on write; write token → 200
+- [x] Effect classes enforced: `:read`, `:write`, `:destroy` with domain scoping
+- [x] clj-kondo 0 errors 0 warnings, cljfmt clean
 
 ### Phase 4 — Extended Coverage
 - [ ] Assets: `GET /trading/assets`, `POST /trading/asset`
@@ -139,4 +142,4 @@ Stroopwafel 0.7.0 runs on bb. Token auth fully integrated.
 
 ---
 
-*Status: Phase 0+1+2 complete (v0.2.0). Phase 3 (write APIs) next.*
+*Status: Phase 0+1+2+3 complete (v0.3.0). Phase 4 (extended coverage) next.*

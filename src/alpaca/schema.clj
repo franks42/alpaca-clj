@@ -73,7 +73,96 @@
     :params      {}
     :alpaca      {:method :get
                   :base   :trading
-                  :path   "/v2/positions"}}])
+                  :path   "/v2/positions"}}
+
+   ;; ── WRITE ──────────────────────────────────────────────────────────
+
+   {:name        :trade/place-order
+    :description "Place a stock order: market, limit, stop, or stop-limit."
+    :effect      :write
+    :route       "/trade/place-order"
+    :method      :post
+    :params      {:symbol        {:type :string :required true
+                                  :description "Stock ticker symbol (e.g. AAPL)"}
+                  :side          {:type :string :required true
+                                  :description "Order side: buy or sell"}
+                  :type          {:type :string :required true
+                                  :description "Order type: market, limit, stop, stop_limit, trailing_stop"}
+                  :qty           {:type :string :required true
+                                  :description "Number of shares"}
+                  :time_in_force {:type :string :required false :default "day"
+                                  :description "Time in force: day, gtc, ioc, opg"}
+                  :limit_price   {:type :string :required false
+                                  :description "Limit price (required for limit/stop_limit)"}
+                  :stop_price    {:type :string :required false
+                                  :description "Stop price (required for stop/stop_limit)"}
+                  :extended_hours {:type :boolean :required false
+                                   :description "Allow extended hours trading"}
+                  :client_order_id {:type :string :required false
+                                    :description "Client-specified order ID"}}
+    :alpaca      {:method :post
+                  :base   :trading
+                  :path   "/v2/orders"}}
+
+   ;; ── READ (orders) ──────────────────────────────────────────────────
+
+   {:name        :trade/orders
+    :description "List orders, optionally filtered by status, symbols, side."
+    :effect      :read
+    :route       "/trade/orders"
+    :method      :post
+    :params      {:status    {:type :string :required false :default "open"
+                              :description "Filter: open, closed, or all"}
+                  :limit     {:type :int :required false :default 50
+                              :description "Max orders to return (max 500)"}
+                  :direction {:type :string :required false
+                              :description "Sort direction: asc or desc"}
+                  :symbols   {:type :string :required false
+                              :description "Comma-separated symbol filter"}
+                  :side      {:type :string :required false
+                              :description "Filter by side: buy or sell"}}
+    :alpaca      {:method :get
+                  :base   :trading
+                  :path   "/v2/orders"}}
+
+   {:name        :trade/order
+    :description "Get a specific order by ID."
+    :effect      :read
+    :route       "/trade/order"
+    :method      :post
+    :params      {:order_id {:type :string :required true
+                             :description "Order ID (UUID)"}}
+    :alpaca      {:method :get
+                  :base   :trading
+                  :path   "/v2/orders/:order_id"}}
+
+   ;; ── DESTROY ────────────────────────────────────────────────────────
+
+   {:name        :trade/cancel-order
+    :description "Cancel an open order by ID."
+    :effect      :destroy
+    :route       "/trade/cancel-order"
+    :method      :post
+    :params      {:order_id {:type :string :required true
+                             :description "Order ID to cancel (UUID)"}}
+    :alpaca      {:method :delete
+                  :base   :trading
+                  :path   "/v2/orders/:order_id"}}
+
+   {:name        :trade/close-position
+    :description "Close an open position (fully or partially)."
+    :effect      :destroy
+    :route       "/trade/close-position"
+    :method      :post
+    :params      {:symbol     {:type :string :required true
+                               :description "Symbol of position to close"}
+                  :qty        {:type :string :required false
+                               :description "Number of shares to close (omit for full close)"}
+                  :percentage {:type :string :required false
+                               :description "Percentage of position to close (e.g. 50)"}}
+    :alpaca      {:method :delete
+                  :base   :trading
+                  :path   "/v2/positions/:symbol"}}])
 
 ;; --- Derived indexes ---
 
@@ -92,7 +181,7 @@
    Strips internal :alpaca mapping (callers don't need to know the backend)."
   []
   {:name    "alpaca-clj"
-   :version "0.1.0"
+   :version "0.3.0"
    :description "Capability-gated proxy for Alpaca Markets trading API. All operations require going through this proxy — no direct Alpaca access."
    :operations
    (mapv (fn [op]
