@@ -193,6 +193,8 @@ The following alpaca-clj functionality should be reviewed for migration to the s
 - [ ] Request envelope signing (method + path + body + UUIDv7 request-id) — currently in `alpaca.auth/sign-request`, could generalize `stroopwafel.request/sign-request` to accept envelope structure
 - [ ] Replay protection (UUIDv7 freshness + nonce cache) — generic middleware, not alpaca-specific
 - [ ] `bytes->hex` / `hex->bytes` utilities — used everywhere, belong in `stroopwafel.crypto`
+- [ ] `alpaca.pep` — PEP pipeline abstraction (create-pep, configurable canonicalize/extract/authorize/exempt)
+- [ ] `alpaca.pep.http-edn` — HTTP+EDN canonicalization template (first of several wire format templates)
 
 ---
 

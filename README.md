@@ -312,6 +312,47 @@ The agent's private key **never leaves the agent's home directory**. The operato
 
 ---
 
+## PEP Pipeline and Request Canonicalization
+
+The Policy Enforcement Point is implemented as a configurable pipeline of plain functions (portable across JVM, bb, CLJS — no protocols, no macros):
+
+```
+wire-request
+  → canonicalize     extract security-relevant facts from wire format
+  → extract-creds    extract token + signature from wire format
+  → authorize        verify token + signature + evaluate Datalog policy
+  → on-allow/on-deny
+```
+
+**The `canonicalize` function is the most security-critical step.** It defines the binding between the wire world (what arrived over the network) and the policy world (what the Datalog evaluator checks). If canonicalization extracts the wrong method, path, or body, the authorization decision will be wrong — even if the crypto is perfect.
+
+This function is **application-specific** — it depends on the wire format (HTTP+EDN, HTTP+JSON, gRPC, CLI, nREPL). The PEP pipeline requires the implementor to provide it explicitly. We supply templates for common formats:
+
+```clojure
+;; alpaca-clj uses the HTTP+EDN template:
+(require '[alpaca.pep :as pep])
+(require '[alpaca.pep.http-edn :as http-edn])
+
+(pep/create-pep
+  {:canonicalize  http-edn/canonicalize   ;; Ring request → canonical envelope
+   :extract-creds http-edn/extract-creds  ;; Bearer token + X-Agent-Signature
+   :authorize     http-edn/authorize      ;; stroopwafel verify + evaluate
+   :exempt?       http-edn/exempt?        ;; /health and /api bypass auth
+   :public-key    root-public-key})
+```
+
+The canonical envelope produced by `canonicalize` is a single map that connects three things:
+
+1. **What arrived** — the actual wire request (method, path, body)
+2. **What was signed** — the agent's signed envelope (compared for integrity)
+3. **What gets evaluated** — the Datalog facts (effect class, domain)
+
+If these three don't agree, the request is rejected. The canonicalization function is where that agreement is defined — and where a mistake would be most dangerous. Making it explicit and auditable is the point.
+
+The PEP pipeline (`alpaca.pep`) is intended to move to the stroopwafel repo as a reusable enforcement framework.
+
+---
+
 ## Key Design Decisions
 
 - **Schema as single source of truth** — one Clojure data structure defines all operations. Router, CLI, Datalog predicates, and API discovery are all derived from it. Adding an endpoint means adding one schema entry.
