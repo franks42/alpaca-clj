@@ -3,7 +3,7 @@
         com.github.franks42/cedn {:mvn/version "1.2.0"}
         com.taoensso/trove       {:mvn/version "1.1.0"}
         com.taoensso/timbre      {:mvn/version "6.8.0"}
-        com.github.franks42/stroopwafel {:mvn/version "0.9.0"}
+        com.github.franks42/stroopwafel {:mvn/version "0.10.0"}
         com.github.franks42/uuidv7 {:mvn/version "0.5.0"}}
 
  :paths ["src" "test"]
