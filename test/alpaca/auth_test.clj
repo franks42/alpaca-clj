@@ -99,34 +99,26 @@
     (is (.contains (:reason result) "signed request"))))
 
 (deftest bound-token-with-valid-signature-allowed
-  (let [token   (issue-bound #{:read} #{"market"})
-        signed  (auth/sign-request :get "/market/clock" {} agent-kp)
-        sig-meta {:agent-key (:agent-key signed)
-                  :sig       (:sig signed)
-                  :timestamp (:timestamp signed)
-                  :body      (:body signed)}
-        result  (auth/verify-and-authorize
-                 token root-pk
-                 {:effect :read :domain "market"
-                  :method :get :path "/market/clock"}
-                 sig-meta
-                 {})]
+  (let [token    (issue-bound #{:read} #{"market"})
+        sig-meta (auth/sign-request :get "/market/clock" {} agent-kp)
+        result   (auth/verify-and-authorize
+                  token root-pk
+                  {:effect :read :domain "market"
+                   :method :get :path "/market/clock"}
+                  sig-meta
+                  {})]
     (is (:authorized result))
     (is (:requester-bound result))))
 
 (deftest bound-token-wrong-agent-key-denied
-  (let [token   (issue-bound #{:read} #{"market"})
-        signed  (auth/sign-request :get "/market/clock" {} rogue-kp)
-        sig-meta {:agent-key (:agent-key signed)
-                  :sig       (:sig signed)
-                  :timestamp (:timestamp signed)
-                  :body      (:body signed)}
-        result  (auth/verify-and-authorize
-                 token root-pk
-                 {:effect :read :domain "market"
-                  :method :get :path "/market/clock"}
-                 sig-meta
-                 {})]
+  (let [token    (issue-bound #{:read} #{"market"})
+        sig-meta (auth/sign-request :get "/market/clock" {} rogue-kp)
+        result   (auth/verify-and-authorize
+                  token root-pk
+                  {:effect :read :domain "market"
+                   :method :get :path "/market/clock"}
+                  sig-meta
+                  {})]
     (is (not (:authorized result)))
     (is (.contains (:reason result) "not bound"))))
 
@@ -135,50 +127,38 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest envelope-method-mismatch-denied
-  (let [token   (issue-bound #{:read} #{"market"})
-        signed  (auth/sign-request :get "/market/clock" {} agent-kp)
-        sig-meta {:agent-key (:agent-key signed)
-                  :sig       (:sig signed)
-                  :timestamp (:timestamp signed)
-                  :body      (:body signed)}
-        result  (auth/verify-and-authorize
-                 token root-pk
-                 {:effect :read :domain "market"
-                  :method :post :path "/market/clock"}
-                 sig-meta
-                 {})]
+  (let [token    (issue-bound #{:read} #{"market"})
+        sig-meta (auth/sign-request :get "/market/clock" {} agent-kp)
+        result   (auth/verify-and-authorize
+                  token root-pk
+                  {:effect :read :domain "market"
+                   :method :post :path "/market/clock"}
+                  sig-meta
+                  {})]
     (is (not (:authorized result)))
     (is (.contains (:reason result) "method"))))
 
 (deftest envelope-path-mismatch-denied
-  (let [token   (issue-bound #{:read} #{"market"})
-        signed  (auth/sign-request :get "/market/clock" {} agent-kp)
-        sig-meta {:agent-key (:agent-key signed)
-                  :sig       (:sig signed)
-                  :timestamp (:timestamp signed)
-                  :body      (:body signed)}
-        result  (auth/verify-and-authorize
-                 token root-pk
-                 {:effect :read :domain "market"
-                  :method :get :path "/market/quote"}
-                 sig-meta
-                 {})]
+  (let [token    (issue-bound #{:read} #{"market"})
+        sig-meta (auth/sign-request :get "/market/clock" {} agent-kp)
+        result   (auth/verify-and-authorize
+                  token root-pk
+                  {:effect :read :domain "market"
+                   :method :get :path "/market/quote"}
+                  sig-meta
+                  {})]
     (is (not (:authorized result)))
     (is (.contains (:reason result) "path"))))
 
 (deftest envelope-body-mismatch-denied
-  (let [token   (issue-bound #{:read} #{"market"})
-        signed  (auth/sign-request :post "/market/quote" {:symbol "AAPL"} agent-kp)
-        sig-meta {:agent-key (:agent-key signed)
-                  :sig       (:sig signed)
-                  :timestamp (:timestamp signed)
-                  :body      (:body signed)}
-        result  (auth/verify-and-authorize
-                 token root-pk
-                 {:effect :read :domain "market"
-                  :method :post :path "/market/quote"}
-                 sig-meta
-                 {:symbol "MSFT"})]
+  (let [token    (issue-bound #{:read} #{"market"})
+        sig-meta (auth/sign-request :post "/market/quote" {:symbol "AAPL"} agent-kp)
+        result   (auth/verify-and-authorize
+                  token root-pk
+                  {:effect :read :domain "market"
+                   :method :post :path "/market/quote"}
+                  sig-meta
+                  {:symbol "MSFT"})]
     (is (not (:authorized result)))
     (is (.contains (:reason result) "body"))))
 
@@ -187,34 +167,28 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest replay-same-request-id-denied
-  (let [token   (issue-bound #{:read} #{"market"})
-        signed  (auth/sign-request :get "/market/clock" {} agent-kp)
-        sig-meta {:agent-key (:agent-key signed)
-                  :sig       (:sig signed)
-                  :timestamp (:timestamp signed)
-                  :body      (:body signed)}
-        req     {:effect :read :domain "market"
-                 :method :get :path "/market/clock"}
+  (let [token    (issue-bound #{:read} #{"market"})
+        sig-meta (auth/sign-request :get "/market/clock" {} agent-kp)
+        req      {:effect :read :domain "market"
+                  :method :get :path "/market/clock"}
         ;; First request — should pass
-        result1 (auth/verify-and-authorize token root-pk req sig-meta {})
+        result1  (auth/verify-and-authorize token root-pk req sig-meta {})
         ;; Replay — same sig-meta — should fail
-        result2 (auth/verify-and-authorize token root-pk req sig-meta {})]
+        result2  (auth/verify-and-authorize token root-pk req sig-meta {})]
     (is (:authorized result1) "First request should pass")
     (is (not (:authorized result2)) "Replay should be denied")
     (is (.contains (:reason result2) "Replay"))))
 
 (deftest fresh-request-ids-both-allowed
-  (let [token (issue-bound #{:read} #{"market"})
-        req   {:effect :read :domain "market"
-               :method :get :path "/market/clock"}
-        make-sig (fn []
-                   (let [signed (auth/sign-request :get "/market/clock" {} agent-kp)]
-                     {:agent-key (:agent-key signed)
-                      :sig       (:sig signed)
-                      :timestamp (:timestamp signed)
-                      :body      (:body signed)}))
-        result1 (auth/verify-and-authorize token root-pk req (make-sig) {})
-        result2 (auth/verify-and-authorize token root-pk req (make-sig) {})]
+  (let [token   (issue-bound #{:read} #{"market"})
+        req     {:effect :read :domain "market"
+                 :method :get :path "/market/clock"}
+        result1 (auth/verify-and-authorize
+                 token root-pk req
+                 (auth/sign-request :get "/market/clock" {} agent-kp) {})
+        result2 (auth/verify-and-authorize
+                 token root-pk req
+                 (auth/sign-request :get "/market/clock" {} agent-kp) {})]
     (is (:authorized result1))
     (is (:authorized result2))))
 
@@ -223,38 +197,32 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest audience-match-allowed
-  (let [token  (issue-bound #{:read} #{"market"})
-        signed (auth/sign-request :get "/market/clock" {} agent-kp "proxy-a:8080")
-        sig    {:agent-key (:agent-key signed) :sig (:sig signed)
-                :timestamp (:timestamp signed) :body (:body signed)}
-        result (auth/verify-and-authorize
-                token root-pk
-                {:effect :read :domain "market" :method :get :path "/market/clock"}
-                sig {} {:proxy-identity "proxy-a:8080"})]
+  (let [token    (issue-bound #{:read} #{"market"})
+        sig-meta (auth/sign-request :get "/market/clock" {} agent-kp "proxy-a:8080")
+        result   (auth/verify-and-authorize
+                  token root-pk
+                  {:effect :read :domain "market" :method :get :path "/market/clock"}
+                  sig-meta {} {:proxy-identity "proxy-a:8080"})]
     (is (:authorized result))))
 
 (deftest audience-mismatch-denied
-  (let [token  (issue-bound #{:read} #{"market"})
-        signed (auth/sign-request :get "/market/clock" {} agent-kp "proxy-a:8080")
-        sig    {:agent-key (:agent-key signed) :sig (:sig signed)
-                :timestamp (:timestamp signed) :body (:body signed)}
-        result (auth/verify-and-authorize
-                token root-pk
-                {:effect :read :domain "market" :method :get :path "/market/clock"}
-                sig {} {:proxy-identity "proxy-b:9090"})]
+  (let [token    (issue-bound #{:read} #{"market"})
+        sig-meta (auth/sign-request :get "/market/clock" {} agent-kp "proxy-a:8080")
+        result   (auth/verify-and-authorize
+                  token root-pk
+                  {:effect :read :domain "market" :method :get :path "/market/clock"}
+                  sig-meta {} {:proxy-identity "proxy-b:9090"})]
     (is (not (:authorized result)))
     (is (.contains (:reason result) "Audience mismatch"))))
 
 (deftest audience-not-set-passes
   (testing "No audience in envelope, no proxy-identity → passes"
-    (let [token  (issue-bound #{:read} #{"market"})
-          signed (auth/sign-request :get "/market/clock" {} agent-kp)
-          sig    {:agent-key (:agent-key signed) :sig (:sig signed)
-                  :timestamp (:timestamp signed) :body (:body signed)}
-          result (auth/verify-and-authorize
-                  token root-pk
-                  {:effect :read :domain "market" :method :get :path "/market/clock"}
-                  sig {} {})]
+    (let [token    (issue-bound #{:read} #{"market"})
+          sig-meta (auth/sign-request :get "/market/clock" {} agent-kp)
+          result   (auth/verify-and-authorize
+                    token root-pk
+                    {:effect :read :domain "market" :method :get :path "/market/clock"}
+                    sig-meta {} {})]
       (is (:authorized result)))))
 
 ;; ---------------------------------------------------------------------------
@@ -333,11 +301,7 @@
   (auth/issue-group-token root-kp {:rights rights}))
 
 (defn make-sig-meta [method path body kp]
-  (let [signed (auth/sign-request method path body kp)]
-    {:agent-key (:agent-key signed)
-     :sig       (:sig signed)
-     :timestamp (:timestamp signed)
-     :body      (:body signed)}))
+  (auth/sign-request method path body kp))
 
 (deftest sdsi-group-member-allowed
   (let [token  (issue-group [["traders" :read "market"]])

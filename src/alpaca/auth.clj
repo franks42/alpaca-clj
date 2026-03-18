@@ -9,7 +9,7 @@
    request-id that serves as both timestamp and nonce for replay protection."
   (:require [stroopwafel.core :as sw]
             [stroopwafel.crypto :as sw-crypto]
-            [stroopwafel.request :as sw-req]
+            [alpaca.envelope :as envelope]
             [com.github.franks42.uuidv7.core :as uuidv7]
             [cedn.core :as cedn] ;; cedn/readers used at runtime
             [clojure.edn :as edn]
@@ -128,38 +128,41 @@
 (defn sign-request
   "Sign a request envelope with the agent's private key.
 
-   The envelope includes method, path, body, UUIDv7 request-id, and
-   an optional audience (proxy identity). The audience prevents
-   cross-proxy replay — a request signed for proxy-A is rejected by proxy-B.
+   The message includes method, path, body, and an optional audience
+   (proxy identity). The envelope layer adds signer-key, request-id,
+   and expires.
 
    Arguments:
-     method   — HTTP method keyword (:get, :post)
-     path     — route path string (\"/market/quote\")
-     body     — EDN map (request body, or {} for GET)
-     agent-kp — agent keypair {:priv :pub}
-     audience — (optional) proxy identity string (e.g. host:port)
+     method      — HTTP method keyword (:get, :post)
+     path        — route path string (\"/market/quote\")
+     body        — EDN map (request body, or {} for GET)
+     agent-kp    — agent keypair {:priv :pub}
+     audience    — (optional) proxy identity string (e.g. host:port)
+     ttl-seconds — (optional) envelope TTL in seconds (default 120)
 
-   Returns: signed request map from stroopwafel.request."
+   Returns: outer envelope {:envelope {:message ... :signer-key ...
+                                       :request-id ... :expires ...}
+                            :signature <bytes>}"
   ([method path body agent-kp]
    (sign-request method path body agent-kp nil))
   ([method path body agent-kp audience]
-   (let [envelope (cond-> {:method     (name method)
-                           :path       path
-                           :body       (or body {})
-                           :request-id (str (uuidv7/uuidv7))}
-                    audience (assoc :audience audience))]
-     (sw-req/sign-request envelope (:priv agent-kp) (:pub agent-kp)))))
+   (sign-request method path body agent-kp audience 120))
+  ([method path body agent-kp audience ttl-seconds]
+   (let [message (cond-> {:method (name method)
+                          :path   path
+                          :body   (or body {})}
+                   audience (assoc :audience audience))]
+     (envelope/sign message (:priv agent-kp) (:pub agent-kp) ttl-seconds))))
 
 (defn serialize-signed-request
-  "Serialize the signature metadata (agent-key, sig, timestamp, and the
-   full envelope) as CEDN for the X-Agent-Signature header."
-  [signed-req]
-  (cedn/canonical-str (select-keys signed-req [:agent-key :sig :timestamp :body])))
+  "Serialize the outer envelope as CEDN for the X-Agent-Signature header."
+  [outer]
+  (envelope/serialize outer))
 
 (defn deserialize-sig-metadata
   "Deserialize signature metadata from header value."
   [s]
-  (edn/read-string {:readers cedn/readers} s))
+  (envelope/deserialize s))
 
 ;; ---------------------------------------------------------------------------
 ;; Replay protection
@@ -260,13 +263,15 @@
 (defn- verify-envelope
   "Verify the signed envelope matches the actual request and passes
    freshness/replay checks. Returns nil if OK, or error map if not.
-   Also checks audience if present in the envelope."
-  [signed-envelope actual-method actual-path actual-body proxy-identity]
-  (let [env-method (:method signed-envelope)
-        env-path   (:path signed-envelope)
-        env-body   (:body signed-envelope)
-        env-req-id (:request-id signed-envelope)
-        env-audience (:audience signed-envelope)]
+   Also checks audience if present in the message.
+
+   After the envelope refactor, the message contains method/path/body/audience,
+   while request-id lives in the outer envelope layer."
+  [message request-id actual-method actual-path actual-body proxy-identity]
+  (let [env-method   (:method message)
+        env-path     (:path message)
+        env-body     (:body message)
+        env-audience (:audience message)]
     (cond
       (not= env-method (name actual-method))
       {:authorized false
@@ -289,9 +294,9 @@
                     "' but this proxy is '" proxy-identity "'")}
 
       :else
-      (if-let [err (check-freshness env-req-id)]
+      (if-let [err (check-freshness request-id)]
         {:authorized false :reason err}
-        (if-let [err (check-replay env-req-id)]
+        (if-let [err (check-replay request-id)]
           {:authorized false :reason err}
           nil)))))
 
@@ -313,36 +318,37 @@
    Datalog resolves: name→key→verified-key→authenticated-as→right."
   [token effect domain sig-metadata actual-method actual-path actual-body roster
    proxy-identity]
-  (let [signed-envelope (:body sig-metadata)
-        signed-req      (assoc sig-metadata :body signed-envelope)
-        verified-key    (sw-req/verify-request signed-req)]
-    (if-not verified-key
+  (let [verified (envelope/verify sig-metadata)]
+    (if-not (:valid? verified)
       {:authorized false :reason "Request signature verification failed"}
-      (or (verify-envelope signed-envelope actual-method actual-path actual-body
-                           proxy-identity)
-          (let [name-facts (roster-facts roster)
-                result (sw/evaluate token
-                                    :explain? true
-                                    :authorizer
-                                    {:facts (into [[:request-verified-agent-key verified-key]]
-                                                  name-facts)
-                                     :rules [{:id   :resolve-name
-                                              :head [:authenticated-as '?name]
-                                              :body [[:named-key '?name '?k]
-                                                     [:request-verified-agent-key '?k]]}]
-                                     :policies [{:kind :allow
-                                                 :query [[:authenticated-as '?name]
-                                                         [:right '?name effect domain]]}]})]
-            (if (:valid? result)
-              {:authorized true
-               :requester-bound true
-               :sdsi-group true
-               :request-id (:request-id signed-envelope)
-               :agent-key-fp (agent-key-fingerprint verified-key)}
-              {:authorized false
-               :reason (str "Agent not in any group with " (name effect)
-                            " access to " domain)
-               :explain (:explain result)}))))))
+      (let [message    (:message verified)
+            request-id (:request-id verified)]
+        (or (verify-envelope message request-id actual-method actual-path
+                             actual-body proxy-identity)
+            (let [verified-key (:signer-key verified)
+                  name-facts   (roster-facts roster)
+                  result (sw/evaluate token
+                                      :explain? true
+                                      :authorizer
+                                      {:facts (into [[:request-verified-agent-key verified-key]]
+                                                    name-facts)
+                                       :rules [{:id   :resolve-name
+                                                :head [:authenticated-as '?name]
+                                                :body [[:named-key '?name '?k]
+                                                       [:request-verified-agent-key '?k]]}]
+                                       :policies [{:kind :allow
+                                                   :query [[:authenticated-as '?name]
+                                                           [:right '?name effect domain]]}]})]
+              (if (:valid? result)
+                {:authorized true
+                 :requester-bound true
+                 :sdsi-group true
+                 :request-id request-id
+                 :agent-key-fp (agent-key-fingerprint verified-key)}
+                {:authorized false
+                 :reason (str "Agent not in any group with " (name effect)
+                              " access to " domain)
+                 :explain (:explain result)})))))))
 
 (defn- check-requester-bound
   "Evaluate a requester-bound token with signed request verification.
@@ -350,37 +356,38 @@
    freshness, and replay protection."
   [token effect domain sig-metadata actual-method actual-path actual-body
    proxy-identity]
-  (let [signed-envelope (:body sig-metadata)
-        signed-req      (assoc sig-metadata :body signed-envelope)
-        verified-key    (sw-req/verify-request signed-req)]
-    (if-not verified-key
+  (let [verified (envelope/verify sig-metadata)]
+    (if-not (:valid? verified)
       {:authorized false :reason "Request signature verification failed"}
-      (or (verify-envelope signed-envelope actual-method actual-path actual-body
-                           proxy-identity)
-          (let [result (sw/evaluate token
-                                    :explain? true
-                                    :authorizer
-                                    {:facts [[:requested-effect effect]
-                                             [:requested-domain domain]
-                                             [:request-verified-agent-key verified-key]]
-                                     :rules [{:id   :agent-bound
-                                              :head [:agent-can-act '?k]
-                                              :body [[:authorized-agent-key '?k]
-                                                     [:request-verified-agent-key '?k]]}]
-                                     :checks [{:id    :check-effect
-                                               :query [[:effect effect]]}
-                                              {:id    :check-domain
-                                               :query [[:domain domain]]}]
-                                     :policies [{:kind :allow
-                                                 :query [[:agent-can-act '?k]]}]})]
-            (if (:valid? result)
-              {:authorized true
-               :requester-bound true
-               :request-id (:request-id signed-envelope)
-               :agent-key-fp (agent-key-fingerprint verified-key)}
-              {:authorized false
-               :reason "Token not bound to this agent key"
-               :explain (:explain result)}))))))
+      (let [message    (:message verified)
+            request-id (:request-id verified)]
+        (or (verify-envelope message request-id actual-method actual-path
+                             actual-body proxy-identity)
+            (let [verified-key (:signer-key verified)
+                  result (sw/evaluate token
+                                      :explain? true
+                                      :authorizer
+                                      {:facts [[:requested-effect effect]
+                                               [:requested-domain domain]
+                                               [:request-verified-agent-key verified-key]]
+                                       :rules [{:id   :agent-bound
+                                                :head [:agent-can-act '?k]
+                                                :body [[:authorized-agent-key '?k]
+                                                       [:request-verified-agent-key '?k]]}]
+                                       :checks [{:id    :check-effect
+                                                 :query [[:effect effect]]}
+                                                {:id    :check-domain
+                                                 :query [[:domain domain]]}]
+                                       :policies [{:kind :allow
+                                                   :query [[:agent-can-act '?k]]}]})]
+              (if (:valid? result)
+                {:authorized true
+                 :requester-bound true
+                 :request-id request-id
+                 :agent-key-fp (agent-key-fingerprint verified-key)}
+                {:authorized false
+                 :reason "Token not bound to this agent key"
+                 :explain (:explain result)})))))))
 
 (defn- extract-signer-key
   "Extract [:signer-key <pk-bytes>] from the token's authority block facts.

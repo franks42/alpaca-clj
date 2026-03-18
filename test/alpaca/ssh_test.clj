@@ -2,8 +2,8 @@
   "Tests for SSH Ed25519 key import."
   (:require [clojure.test :refer [deftest is]]
             [alpaca.ssh :as ssh]
+            [alpaca.envelope :as envelope]
             [stroopwafel.core :as sw]
-            [stroopwafel.request :as req]
             [stroopwafel.crypto :as crypto]))
 
 ;; Generate a temp SSH keypair for testing
@@ -42,10 +42,11 @@
     (is (some? (:pub kp)))))
 
 (deftest ssh-keys-sign-and-verify
-  (let [kp     (ssh/load-ssh-keypair test-priv-path)
-        signed (req/sign-request {:action :test} (:priv kp) (:pub kp))
-        verified (req/verify-request signed)]
-    (is (some? verified) "Signature should verify")))
+  (let [kp       (ssh/load-ssh-keypair test-priv-path)
+        outer    (envelope/sign {:action :test} (:priv kp) (:pub kp) 60)
+        verified (envelope/verify outer)]
+    (is (:valid? verified) "Signature should verify")
+    (is (= {:action :test} (:message verified)))))
 
 (deftest ssh-keys-work-with-stroopwafel-tokens
   (let [ssh-kp    (ssh/load-ssh-keypair test-priv-path)
@@ -56,11 +57,11 @@
                             [:effect :read]
                             [:domain "market"]]}
                    {:private-key (:priv root-kp)})
-        signed    (req/sign-request {:action :test} (:priv ssh-kp) (:pub ssh-kp))
-        verified  (req/verify-request signed)
+        outer     (envelope/sign {:action :test} (:priv ssh-kp) (:pub ssh-kp) 60)
+        verified  (envelope/verify outer)
         result    (sw/evaluate token
                                :authorizer
-                               {:facts [[:request-verified-agent-key verified]]
+                               {:facts [[:request-verified-agent-key (:signer-key verified)]]
                                 :rules [{:id   :ab
                                          :head [:ok '?k]
                                          :body [[:authorized-agent-key '?k]

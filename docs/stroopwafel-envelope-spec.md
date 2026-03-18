@@ -78,14 +78,16 @@ The signing function:
 
 ```clojure
 (envelope/verify outer-envelope)
-;; → {:valid?     true/false        ;; signature check
-;;    :message    <the payload>     ;; what was asserted
-;;    :signer-key <pk-bytes>        ;; who asserted it
-;;    :request-id "019d0114-..."    ;; unique assertion ID
-;;    :timestamp  1742000000000     ;; extracted from UUIDv7
-;;    :expires    1742000003600000  ;; when it expires
-;;    :expired?   true/false        ;; now > expires
-;;    :age-ms     3400}             ;; now - timestamp
+;; → {:valid?          true/false        ;; signature check
+;;    :message         <the payload>     ;; what was asserted
+;;    :signer-key      <pk-bytes>        ;; who asserted it
+;;    :request-id      "019d0114-..."    ;; unique assertion ID
+;;    :timestamp       1742000000000     ;; extracted from UUIDv7
+;;    :expires         1742000003600000  ;; when it expires
+;;    :expired?        true/false        ;; now > expires
+;;    :age-ms          3400              ;; now - timestamp
+;;    :digest          <bytes>           ;; SHA-256(CEDN(inner)) — unique per envelope
+;;    :message-digest  <bytes>}          ;; SHA-256(CEDN(message)) — same across signers
 ```
 
 The verification function:
@@ -231,6 +233,79 @@ query-level work. The data is already there when they're needed.
 
 ---
 
+## Multi-Signature Quorum
+
+Multiple signers (e.g., a panel of LLM judges evaluating an AI agent's
+intent) can each independently sign the same assertion. The envelope
+layer doesn't need to know about panels or thresholds — each signer
+produces a standard envelope. Consensus logic lives in the policy layer.
+
+### Two Digests
+
+The `verify` function returns two digests:
+
+| Field | Hash of | Same across signers? | Purpose |
+|---|---|---|---|
+| `:digest` | `CEDN(inner-envelope)` | No — includes signer-key, request-id, expires | Unique envelope fingerprint (logging, debugging) |
+| `:message-digest` | `CEDN(message)` | **Yes** — only the assertion content | Quorum comparison |
+
+The `:message-digest` is the quorum key. If two judges signed the same
+message, their `:message-digest` values are byte-identical regardless
+of who signed, when they signed, or what TTL they chose.
+
+### Consensus Validity Window
+
+Each judge signs independently with their own TTL. The consensus is
+only valid during the **overlap** of all judges' validity intervals:
+
+```
+Judge 1:  |----timestamp-1-----------expires-1----|
+Judge 2:     |----timestamp-2----expires-2----|
+Judge 3:  |------timestamp-3--------expires-3--------|
+                  ↑                   ↑
+Consensus:        valid-from          valid-to
+              (max of timestamps)  (min of expires)
+```
+
+```clojure
+(let [verified (mapv envelope/verify panel-envelopes)]
+  {:valid-from (apply max (map :timestamp verified))
+   :valid-to   (apply min (map :expires verified))})
+```
+
+If `valid-from >= valid-to`, there is no consensus — the judges never
+simultaneously vouched for the assertion.
+
+This is a security property: a compromised judge that signs with an
+extremely long TTL cannot extend the consensus window beyond the
+shortest-lived honest judge's envelope. The most conservative signer
+constrains the window.
+
+### Quorum as Datalog
+
+The threshold check is a Datalog rule in the policy layer:
+
+```clojure
+;; Facts from verified envelopes
+[:panel-approved <signer-key> <message-digest>]
+[:panel-member "safety-panel" <signer-key>]
+
+;; 2-of-3 threshold rule
+{:id   :quorum-met
+ :head [:quorum-approved '?hash]
+ :body [[:panel-approved '?k1 '?hash]
+        [:panel-approved '?k2 '?hash]
+        [:panel-member "safety-panel" '?k1]
+        [:panel-member "safety-panel" '?k2]
+        [:guard (not= '?k1 '?k2)]]}
+```
+
+The envelope provides the signed assertions and digests. The policy
+layer defines who counts as a panel member, what the threshold is,
+and whether the consensus window is still live.
+
+---
+
 ## What the Envelope Does NOT Do
 
 The envelope is deliberately minimal. These concerns belong above it:
@@ -243,6 +318,7 @@ The envelope is deliberately minimal. These concerns belong above it:
 | **Message interpretation** | Application layer | Envelope is message-opaque |
 | **Revocation** | PEP (Datalog facts) | Revocation is just more facts in the join |
 | **Block structure** | Application layer | Message is any EDN — blocks are app semantics |
+| **Multi-sig quorum** | PEP (Datalog threshold rule) | Envelope is single-signer; quorum is policy over multiple envelopes |
 
 ---
 
