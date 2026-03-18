@@ -116,3 +116,83 @@
                                   {:symbol "AAPL" :limit "5"}))]
     ;; "5" should coerce to 5 — not rejected
     (is (not= 400 (:status resp)))))
+
+;; ---------------------------------------------------------------------------
+;; Business-rule constraints
+;; ---------------------------------------------------------------------------
+
+(deftest enum-validation-side
+  (let [handler (make-handler)
+        base    {:symbol "AAPL" :type "market" :qty "1"}]
+    (testing "valid side"
+      (let [resp (handler (request :post "/trade/place-order"
+                                   (assoc base :side "buy")))]
+        (is (not= 400 (:status resp)))))
+    (testing "invalid side"
+      (let [resp (handler (request :post "/trade/place-order"
+                                   (assoc base :side "short")))]
+        (is (= 400 (:status resp)))
+        (is (.contains (:error (parse-body resp)) "side must be one of"))))))
+
+(deftest enum-validation-order-type
+  (let [handler (make-handler)
+        resp    (handler (request :post "/trade/place-order"
+                                  {:symbol "AAPL" :side "buy" :type "banana" :qty "1"}))]
+    (is (= 400 (:status resp)))
+    (is (.contains (:error (parse-body resp)) "type must be one of"))))
+
+(deftest conditional-require-limit-price
+  (let [handler (make-handler)]
+    (testing "limit order without limit_price → 400"
+      (let [resp (handler (request :post "/trade/place-order"
+                                   {:symbol "AAPL" :side "buy" :type "limit" :qty "1"}))]
+        (is (= 400 (:status resp)))
+        (is (.contains (:error (parse-body resp)) "limit_price"))))
+    (testing "limit order with limit_price → ok"
+      (let [resp (handler (request :post "/trade/place-order"
+                                   {:symbol "AAPL" :side "buy" :type "limit"
+                                    :qty "1" :limit_price "200"}))]
+        (is (not= 400 (:status resp)))))))
+
+(deftest conditional-require-stop-price
+  (let [handler (make-handler)
+        resp    (handler (request :post "/trade/place-order"
+                                  {:symbol "AAPL" :side "buy" :type "stop" :qty "1"}))]
+    (is (= 400 (:status resp)))
+    (is (.contains (:error (parse-body resp)) "stop_price"))))
+
+(deftest conditional-require-stop-limit
+  (let [handler (make-handler)]
+    (testing "stop_limit needs both prices"
+      (let [resp (handler (request :post "/trade/place-order"
+                                   {:symbol "AAPL" :side "buy" :type "stop_limit"
+                                    :qty "1" :limit_price "200"}))]
+        (is (= 400 (:status resp)))
+        (is (.contains (:error (parse-body resp)) "stop_price"))))
+    (testing "stop_limit with both prices → ok"
+      (let [resp (handler (request :post "/trade/place-order"
+                                   {:symbol "AAPL" :side "buy" :type "stop_limit"
+                                    :qty "1" :limit_price "200" :stop_price "195"}))]
+        (is (not= 400 (:status resp)))))))
+
+(deftest market-order-no-extra-prices-needed
+  (let [handler (make-handler)
+        resp    (handler (request :post "/trade/place-order"
+                                  {:symbol "AAPL" :side "buy" :type "market" :qty "1"}))]
+    (is (not= 400 (:status resp)))))
+
+(deftest mutex-qty-percentage
+  (let [handler (make-handler)]
+    (testing "both qty and percentage → 400"
+      (let [resp (handler (request :post "/trade/close-position"
+                                   {:symbol "AAPL" :qty "10" :percentage "50"}))]
+        (is (= 400 (:status resp)))
+        (is (.contains (:error (parse-body resp)) "Only one of"))))
+    (testing "just qty → ok"
+      (let [resp (handler (request :post "/trade/close-position"
+                                   {:symbol "AAPL" :qty "10"}))]
+        (is (not= 400 (:status resp)))))
+    (testing "neither → ok (full close)"
+      (let [resp (handler (request :post "/trade/close-position"
+                                   {:symbol "AAPL"}))]
+        (is (not= 400 (:status resp)))))))

@@ -8,7 +8,11 @@
    - :route       — URL path on the proxy
    - :method      — HTTP method on the proxy (:get or :post)
    - :params      — parameter spec (key → {:type :required :description :default})
-   - :alpaca      — Alpaca REST mapping {:method :base :path :param-map}")
+   - :alpaca      — Alpaca REST mapping {:method :base :path :param-map}
+   - :constraints — (optional) vector of declarative validation rules:
+     {:enum {<key> [allowed-values]}}          — value must be one of the listed values
+     {:when {<key> <value>} :require [<keys>]} — conditional required params
+     {:mutex [<key1> <key2>]}                  — at most one may be present")
 
 (def operations
   "All operations the proxy can perform.
@@ -100,6 +104,12 @@
                                    :description "Allow extended hours trading"}
                   :client_order_id {:type :string :required false
                                     :description "Client-specified order ID"}}
+    :constraints [{:enum {:side ["buy" "sell"]}}
+                  {:enum {:type ["market" "limit" "stop" "stop_limit" "trailing_stop"]}}
+                  {:enum {:time_in_force ["day" "gtc" "ioc" "opg"]}}
+                  {:when {:type "limit"}      :require [:limit_price]}
+                  {:when {:type "stop"}       :require [:stop_price]}
+                  {:when {:type "stop_limit"} :require [:limit_price :stop_price]}]
     :alpaca      {:method :post
                   :base   :trading
                   :path   "/v2/orders"}}
@@ -121,6 +131,9 @@
                               :description "Comma-separated symbol filter"}
                   :side      {:type :string :required false
                               :description "Filter by side: buy or sell"}}
+    :constraints [{:enum {:status ["open" "closed" "all"]}}
+                  {:enum {:direction ["asc" "desc"]}}
+                  {:enum {:side ["buy" "sell"]}}]
     :alpaca      {:method :get
                   :base   :trading
                   :path   "/v2/orders"}}
@@ -160,6 +173,7 @@
                                :description "Number of shares to close (omit for full close)"}
                   :percentage {:type :string :required false
                                :description "Percentage of position to close (e.g. 50)"}}
+    :constraints [{:mutex [:qty :percentage]}]
     :alpaca      {:method :delete
                   :base   :trading
                   :path   "/v2/positions/:symbol"}}])

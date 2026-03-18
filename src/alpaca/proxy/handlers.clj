@@ -1,9 +1,10 @@
 (ns alpaca.proxy.handlers
   "Request handlers for proxy endpoints.
-   Each handler: parse EDN body → validate → call Alpaca client → return EDN response."
+   Each handler: parse EDN body → validate → check constraints → call Alpaca → return EDN."
   (:require [alpaca.client :as client]
             [alpaca.keys :as keys]
-            [clojure.edn :as edn]))
+            [clojure.edn :as edn]
+            [clojure.string :as str]))
 
 (defn- read-edn-body
   "Read EDN from request body. Returns empty map for GET requests."
@@ -70,6 +71,61 @@
    [{} nil]
    params))
 
+;; ---------------------------------------------------------------------------
+;; Constraint evaluation
+;; ---------------------------------------------------------------------------
+
+(defn- check-enum
+  "Check {:enum {:key [\"val1\" \"val2\"]}} — value must be in the allowed set."
+  [params {:keys [enum]}]
+  (reduce-kv
+   (fn [_ k allowed]
+     (when-let [v (get params k)]
+       (when-not (some #{v} allowed)
+         (reduced (str (name k) " must be one of "
+                       (str/join ", " allowed)
+                       ", got: " (pr-str v))))))
+   nil
+   enum))
+
+(defn- check-when-require
+  "Check {:when {:key \"val\"} :require [:k1 :k2]} — conditional required params."
+  [params {:keys [when require]}]
+  (let [[cond-key cond-val] (first when)]
+    (clojure.core/when (= (get params cond-key) cond-val)
+      (let [missing (filter #(nil? (get params %)) require)]
+        (clojure.core/when (seq missing)
+          (str "When " (name cond-key) " is " (pr-str cond-val)
+               ", the following are required: "
+               (str/join ", " (map name missing))))))))
+
+(defn- check-mutex
+  "Check {:mutex [:k1 :k2]} — at most one may be present."
+  [params {:keys [mutex]}]
+  (let [present (filter #(contains? params %) mutex)]
+    (when (> (count present) 1)
+      (str "Only one of " (str/join ", " (map name mutex))
+           " may be specified, got: " (str/join ", " (map name present))))))
+
+(defn- validate-constraints
+  "Evaluate all constraints for an operation. Returns nil or first error string."
+  [params constraints]
+  (when (seq constraints)
+    (reduce
+     (fn [_ constraint]
+       (let [err (cond
+                   (:enum constraint)    (check-enum params constraint)
+                   (:when constraint)    (check-when-require params constraint)
+                   (:mutex constraint)   (check-mutex params constraint)
+                   :else                 nil)]
+         (when err (reduced err))))
+     nil
+     constraints)))
+
+;; ---------------------------------------------------------------------------
+;; Main handler
+;; ---------------------------------------------------------------------------
+
 (defn handle-request
   "Generic handler for any schema-defined operation.
 
@@ -77,6 +133,7 @@
    1. Required parameters present
    2. Parameter types match schema (coerces where possible)
    3. No unknown parameters (closed schema)
+   4. Business-rule constraints (enums, conditional requires, mutex)
 
    Arguments:
      op     — operation schema map (from alpaca.schema)
@@ -95,7 +152,10 @@
         ;; 3. Type validation + coercion
         [params type-err] (validate-and-coerce params schema-params)
         _             (when type-err (throw (ex-info type-err {:status 400})))
-        ;; 4. Forward to Alpaca
+        ;; 4. Business-rule constraints
+        cons-err      (validate-constraints params (:constraints op))
+        _             (when cons-err (throw (ex-info cons-err {:status 400})))
+        ;; 5. Forward to Alpaca
         result        (client/request! (:alpaca op) params config)
         result        (keys/expand-response (:name op) result)]
     {:status 200
