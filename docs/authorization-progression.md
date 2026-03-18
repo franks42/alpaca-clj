@@ -277,5 +277,26 @@ authorization logic (Datalog) instead of certificate chain validation.
 
 ---
 
-*Document status: design reference, reflecting alpaca-clj v0.3.1 + stroopwafel 0.9.0.*
+## Safety Property: Inert Facts
+
+A fact in the Datalog DB without a matching trust root is inert — it cannot
+contribute to an allow decision. This holds across all four levels.
+
+A token can carry any facts it wants: `[:effect :write]`, `[:domain "trade"]`,
+`[:right "admin" :destroy "everything"]`. None of it matters without a
+corresponding `[:trusted-root <signer-key> ...]` fact from the enforcement
+actor's configuration. The authorization join requires both sides:
+
+```
+[:signer-key ?k] ∧ [:trusted-root ?k ?effect ?domain]
+```
+
+Without the trust root half, the join never fires. Closed-world default → deny.
+The worst case for an unrecognized signer is wasted space in the per-request
+fact store, not unauthorized access. Facts are just stroopwafel filling
+without the matching trust root to complete the join.
+
+---
+
+*Document status: design reference, reflecting alpaca-clj v0.5.2 + stroopwafel 0.9.0.*
 *Last updated: March 2026.*

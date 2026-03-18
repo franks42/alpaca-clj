@@ -354,6 +354,45 @@ choose to trust."
 
 ---
 
+## Inert Facts: The Closed-World Safety Property
+
+A critical safety property of the Datalog-based trust model: **facts without
+matching trust roots are inert.** They sit in the fact store doing nothing.
+
+Consider a token with `[:signer-key <unknown-pk>]` presented to the proxy.
+The proxy adds the token's facts to the Datalog DB. But the proxy's config
+has no `[:trusted-root <unknown-pk> ...]` fact for this key. The authorization
+join requires both:
+
+```
+[:signer-key ?k] ∧ [:trusted-root ?k ?effect ?domain]
+```
+
+Without the second fact, the join never fires. No derived facts, no policy
+match, closed-world default → deny. The unknown signer's facts are just
+stroopwafel filling — they take up space but can't contribute to an allow
+decision.
+
+This is fundamentally different from systems where adding facts can grant
+access. In our model, **only the enforcement actor can add trust-root facts**
+(from its configuration). Without those, no amount of token-supplied facts
+can produce an allow. The token can say whatever it wants — `[:effect :write]`,
+`[:domain "trade"]`, `[:right "admin" :destroy "everything"]` — none of it
+matters without a matching trust root.
+
+The worst case for an unrecognized token is wasted space in the fact store,
+not unauthorized access. And since fact stores are per-request (not
+persistent), even the space is reclaimed immediately.
+
+This property holds regardless of fact insertion order: trust-root facts
+can be added before or after token facts. The Datalog engine joins them
+when it evaluates, not when they're inserted. An authority key added to
+the config after a token was already processed would authorize future
+requests from that authority — but never retroactively authorize past ones
+(those evaluations already completed with a deny).
+
+---
+
 *This is the foundation. Everything else is delegation.*
 
 ---
