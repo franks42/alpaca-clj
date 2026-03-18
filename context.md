@@ -3,7 +3,7 @@
 > Current state snapshot for session continuity.
 > Read this + CLAUDE.md + plan.md to get up to speed.
 >
-> Last updated: 2026-03-18, v0.5.3 (tag: v0.5.3, commit: 732e67f + docs)
+> Last updated: 2026-03-18, v0.6.0 (tag: v0.6.0, commit: 169de15 + docs)
 
 ---
 
@@ -19,7 +19,7 @@ Four-party architecture:
 3. **Proxy** (this project) — verifies token + request signature, forwards to Alpaca
 4. **Alpaca Markets** — sees only the proxy's API credentials
 
-## Current State (v0.5.3)
+## Current State (v0.6.0)
 
 **10 endpoints** across 3 domains (account, market, trade):
 
@@ -36,7 +36,7 @@ Four-party architecture:
 | /trade/cancel-order | destroy | POST |
 | /trade/close-position | destroy | POST |
 
-**75 tests, 170 assertions, 0 failures.** Run with `bb test`.
+**90 tests, 218 assertions, 0 failures.** Run with `bb test`.
 
 ## Architecture — Key Files
 
@@ -46,7 +46,8 @@ src/alpaca/
   schema.clj              — single source of truth (routes, params, constraints, alpaca mapping)
   client.clj              — HTTP client to Alpaca REST (JSON internally, EDN at boundary)
   keys.clj                — expand terse Alpaca keys (bp→bid-price, o→open)
-  auth.clj                — token issuance, signing, verification, authorization (BIGGEST FILE)
+  envelope.clj            — generic signed envelope: sign/verify (message-opaque)
+  auth.clj                — token issuance, verification, authorization (uses envelope)
   ssh.clj                 — SSH Ed25519 key import (standalone, no alpaca deps)
   telemetry.clj           — trove/timbre bootstrap, stderr routing
   pep.clj                 — PEP pipeline abstraction (canonicalize→extract→authorize→allow/deny)
@@ -68,13 +69,14 @@ test/alpaca/
   auth_test.clj            — 42 tests: bearer, SPKI, SDSI, replay, envelope, audience, multi-root, hex
   pep_test.clj             — 10 tests: canonicalization, exemption, credentials, pipeline composition
   keys_test.clj            — 5 tests: key expansion
-  ssh_test.clj             — 5 tests: SSH key import, stroopwafel integration
+  ssh_test.clj             — 5 tests: SSH key import, envelope integration
+  envelope_test.clj        — 15 tests: sign/verify, tampering, expiry, opacity, digests, serialization
 
 docs/
   authorization-progression.md     — bearer→SPKI→SDSI→federated (one mechanism, four levels)
   trust-roots-and-enforcement.md   — enforcement actor as trust root, multi-authority scoped trust
   dual-pep-client-server-enforcement.md — client-side + server-side PEP
-  stroopwafel-envelope-spec.md     — NEXT: generic signed envelope spec (to be implemented)
+  stroopwafel-envelope-spec.md     — generic signed envelope spec (IMPLEMENTED, with quorum section)
   alpaca-clj-review-gpt.md         — first GPT review
   alpaca-clj-review-gpt-2.md       — second GPT review (all P0-P2 addressed)
   alpaca-clj-review-gemini.md      — first Gemini review
@@ -100,41 +102,43 @@ decides if the signer is trusted for this operation.
 
 **Replay protection:** UUIDv7 as combined timestamp+nonce. 120s freshness window + in-memory nonce cache.
 
-**Envelope signing:** Agent signs `{:method :path :body :request-id :audience}`. Proxy reconstructs and verifies envelope matches actual request.
+**Envelope signing (v0.6.0):** Generic `alpaca.envelope/sign` wraps any EDN
+message in `{:envelope {:message :signer-key :request-id :expires} :signature}`.
+`alpaca.auth` passes `{:method :path :body [:audience]}` as the message.
+Verify returns `:digest` (full envelope hash) and `:message-digest` (message-only
+hash, for multi-signature quorum comparison).
 
 **Business-rule validation:** Declarative constraints in schema:
 - `{:enum {:side ["buy" "sell"]}}` — value must be in set
 - `{:when {:type "limit"} :require [:limit_price]}` — conditional required
 - `{:mutex [:qty :percentage]}` — at most one
 
-## What's Next — The Envelope Refactor
+## Envelope Design
 
-**Read `docs/stroopwafel-envelope-spec.md` for the full spec.**
+**`alpaca.envelope`** — message-opaque signed envelope (~80 lines):
+- `sign [message priv-key pub-key ttl-seconds]` → outer envelope
+- `verify [outer-envelope]` → `{:valid? :message :signer-key :request-id :timestamp :expires :expired? :age-ms :digest :message-digest}`
+- `serialize` / `deserialize` — CEDN round-trip for transport
 
-The current signing is split between `stroopwafel.request` (low-level) and
-`alpaca.auth` (HTTP-specific envelope). The goal is a clean generic envelope:
+**Key properties:**
+- `:expires` is absolute epoch-ms (signer thinks in TTL, envelope stores absolute)
+- `:signer-key` embedded — self-describing, no lookup needed
+- `:digest` = SHA-256(CEDN(inner)) — unique per envelope
+- `:message-digest` = SHA-256(CEDN(message)) — same across signers of same message
+- Verify reports but doesn't reject expired envelopes — caller decides
 
-```
-stroopwafel.envelope (to be created, here first, migrate later):
-  sign:   (message, priv-key, pub-key, ttl) → {:envelope {:message :signer-key :request-id :expires} :signature}
-  verify: (outer-envelope) → {:valid? :message :signer-key :timestamp :expires :expired? :age-ms}
-```
+**Multi-signature quorum** (designed, not yet implemented):
+- Each judge independently signs the same message → separate envelopes
+- Compare `:message-digest` to confirm agreement
+- Consensus validity = overlap of all intervals: `(max timestamps, min expires)`
+- Threshold check is a Datalog rule over `[:panel-approved signer-key message-digest]`
 
-Key design decisions already made:
-- `:expires` not `:ttl` — absolute epoch-ms, one comparison at eval time
-- `:signer-key` in envelope — self-describing, no lookup needed
-- Per-fact temporal validity — `valid-from` + `valid-to` on every fact
-- Pre-eval filter: `(and (<= valid-from now) (< now valid-to))` — two comparisons
-- Data model complete (store both bounds), queries simple (just filter at now)
-- Envelope is message-opaque — trust, replay, audience all in layers above
-- Replaces `stroopwafel.request` with cleaner separation
+## What's Next
 
-Implementation plan:
-1. Create `alpaca.envelope` namespace (~50 lines) with `sign`/`verify`
-2. Refactor `alpaca.auth` to use `envelope` instead of `stroopwafel.request`
-3. Update `alpaca.pep.http-edn` and `alpaca.cli.common`
-4. Update tests (ensure all 75 still pass)
-5. Later: move `alpaca.envelope` → `stroopwafel.envelope`
+- **Phase 4** — Extended endpoint coverage (assets, watchlists, crypto, options)
+- **Phase 4b** — Dual PEP / client-side enforcement with audience verification
+- **Phase 5** — Production hardening (trust bootstrap, audit log, temporal constraints)
+- **Migration** — Move envelope, ssh, pep, replay, hex utils to stroopwafel repo
 
 ## Dependencies
 
@@ -161,7 +165,7 @@ Implementation plan:
 ## Key Commands
 
 ```bash
-bb test                    # 75 tests, 170 assertions
+bb test                    # 90 tests, 218 assertions
 bb server:start &          # start proxy
 bb server:stop             # stop proxy
 bb server:status           # check running

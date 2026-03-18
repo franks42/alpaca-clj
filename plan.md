@@ -3,7 +3,7 @@
 > Capability-gated proxy trading server for Alpaca Markets.
 > Babashka runtime. EDN end-to-end. fn-as-URL routing. Stroopwafel authorization.
 >
-> Last updated: 2026-03-17
+> Last updated: 2026-03-18
 
 ---
 
@@ -86,6 +86,22 @@ Stroopwafel 0.7.0 runs on bb. Token auth fully integrated.
 - [x] End-to-end: place limit order → query → cancel (paper trading)
 - [x] Auth: read-only token → 403 on write; write token → 200
 - [x] Effect classes enforced: `:read`, `:write`, `:destroy` with domain scoping
+- [x] clj-kondo 0 errors 0 warnings, cljfmt clean
+
+### Phase 3b — Envelope Refactor **[DONE — v0.6.0]**
+Generic signed envelope extracted from auth. Multi-signature quorum designed.
+- [x] `alpaca.envelope` namespace: `sign`, `verify`, `serialize`, `deserialize`
+- [x] Message-opaque: envelope doesn't interpret message content
+- [x] `:expires` (absolute epoch-ms) computed from TTL at sign time
+- [x] `:signer-key` embedded in envelope (self-describing)
+- [x] UUIDv7 `:request-id` in envelope layer (not in message)
+- [x] `auth.clj` refactored: uses `envelope/sign` and `envelope/verify`
+- [x] Removed `stroopwafel.request` dependency from `auth.clj`
+- [x] `:digest` (SHA-256 of full inner envelope) in verify result
+- [x] `:message-digest` (SHA-256 of message only) for multi-signature quorum
+- [x] Envelope spec updated with quorum section and consensus validity window
+- [x] 15 new envelope tests, all auth/ssh tests updated
+- [x] 90 tests, 218 assertions, 0 failures
 - [x] clj-kondo 0 errors 0 warnings, cljfmt clean
 
 ### Phase 4 — Extended Coverage
@@ -221,4 +237,4 @@ The following alpaca-clj functionality should be reviewed for migration to the s
 
 ---
 
-*Status: Phase 0+1+2+3 complete (v0.4.0). Replay protection + envelope signing + domain normalization. Phase 4 or 5 next.*
+*Status: Phase 0+1+2+3+3b complete (v0.6.0). Generic envelope with quorum support. Phase 4 or 5 next.*
