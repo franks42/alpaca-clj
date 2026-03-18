@@ -173,65 +173,48 @@ Constraints:
 
 ### Pre-Evaluation Filter
 
-Before Datalog evaluation, the fact store is filtered by the query time:
+Before Datalog evaluation, the fact store is filtered by `now`:
 
 ```clojure
-(defn live-facts-at [all-facts query-time]
-  (filter (fn [{:keys [valid-from valid-to]}]
-            (and (<= valid-from query-time)
-                 (< query-time valid-to)))
-          all-facts))
+(defn live-at? [now {:keys [valid-from valid-to]}]
+  (and (<= valid-from now) (< now valid-to)))
 ```
 
-The default query time is `now`. Expired facts are **absent**, not denied.
-They don't participate in any join. The Datalog engine receives only live
-facts and evaluates normally — no engine changes required.
+Two comparisons per fact. Captures `now` once, filters once, evaluates
+against the frozen set. The result is valid as of that moment.
 
-Evaluation is a **point-in-time snapshot**: capture `now` once, filter once,
-evaluate against the frozen set. The result is valid as of that moment.
+This filter is the **only** temporal logic in the current implementation.
+No `:as-of` parameter, no cross-time queries, no temporal scanning.
+The data model carries full validity windows (`valid-from` + `valid-to`),
+but the runtime only asks: "is this fact live right now?"
 
-### Temporal Queries and Diagnostics
+### Data Model vs. Queries
 
-The fact store SHOULD retain all facts (including expired ones) rather
-than discarding them. This enables temporal queries — re-evaluating the
-same policy at a different point in time:
+The fact store retains `valid-from` and `valid-to` on every fact,
+even though the current implementation only uses them for the simple
+live-at-now filter. This is intentional:
+
+**Data model (complete — do now):**
+- Every fact carries `valid-from` and `valid-to`
+- Pre-eval filter checks both bounds
+- Expired facts retained in the store (not deleted)
+
+**Advanced queries (enabled by data model — do later):**
+- `:as-of` evaluation at arbitrary timestamps
+- Denial diagnostics: "would this have worked 5 seconds ago?"
+- Audit: "was this authorized at processing time?"
+- Temporal scanning for expiry analysis
+
+The advanced queries require no schema or data model changes — only
+query-level work. The data is already there when they're needed.
 
 ```clojure
-;; Standard evaluation: "is this allowed now?"
-(evaluate facts {:as-of (System/currentTimeMillis)})
-;; → {:valid? false}
+;; Current: simple filter
+(evaluate facts)  ;; filters at now, evaluates
 
-;; Diagnostic: "would this have been allowed 5 seconds ago?"
-(evaluate facts {:as-of (- (System/currentTimeMillis) 5000)})
-;; → {:valid? true}
-;; → Conclusion: request arrived 5 seconds too late, fact [:method "post"] expired
-
-;; Audit: "was this authorized at the time it was processed?"
-(evaluate facts {:as-of processing-timestamp})
-
-;; Simulation: "if we add this trust root, what past requests would have been allowed?"
-(evaluate (concat facts new-trust-roots) {:as-of historical-timestamp})
+;; Future (no data changes needed, only query changes):
+(evaluate facts {:as-of (- now 5000)})  ;; same data, different filter time
 ```
-
-The denial diagnostic becomes a temporal scan:
-
-```
-Denied at T=now.
-Evaluated at T=now-1s: allowed.
-Evaluated at T=now-2s: allowed.
-Fact [:method "post"] valid-from=T-35s valid-to=T-5s.
-→ Request arrived 5 seconds after the request assertion expired.
-→ The 30-second request TTL was exceeded.
-```
-
-No special debugging logic — re-run the same query at earlier timestamps.
-Same engine, same facts, different query time. Facts don't disappear;
-they have temporal boundaries.
-
-This is a basic **temporal Datalog** model: each fact has a validity window,
-evaluation is parameterized by time, and the fact store is append-only.
-The simple implementation filters expired facts before evaluation.
-The full implementation retains all facts and supports `:as-of` queries.
 
 ### Expiry Subsumes Several Mechanisms
 
