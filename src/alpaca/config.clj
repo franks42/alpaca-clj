@@ -39,4 +39,5 @@
      :stroopwafel-root-key (System/getenv "STROOPWAFEL_ROOT_KEY")
      :proxy-port          (parse-long (or (System/getenv "PROXY_PORT") "8080"))
      :proxy-host          (or (System/getenv "PROXY_HOST") "127.0.0.1")
+     :proxy-identity      (System/getenv "PROXY_IDENTITY")
      :roster              (load-roster)}))

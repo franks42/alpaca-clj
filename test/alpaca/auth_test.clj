@@ -219,6 +219,45 @@
     (is (:authorized result2))))
 
 ;; ---------------------------------------------------------------------------
+;; Audience binding
+;; ---------------------------------------------------------------------------
+
+(deftest audience-match-allowed
+  (let [token  (issue-bound #{:read} #{"market"})
+        signed (auth/sign-request :get "/market/clock" {} agent-kp "proxy-a:8080")
+        sig    {:agent-key (:agent-key signed) :sig (:sig signed)
+                :timestamp (:timestamp signed) :body (:body signed)}
+        result (auth/verify-and-authorize
+                token root-pk
+                {:effect :read :domain "market" :method :get :path "/market/clock"}
+                sig {} {:proxy-identity "proxy-a:8080"})]
+    (is (:authorized result))))
+
+(deftest audience-mismatch-denied
+  (let [token  (issue-bound #{:read} #{"market"})
+        signed (auth/sign-request :get "/market/clock" {} agent-kp "proxy-a:8080")
+        sig    {:agent-key (:agent-key signed) :sig (:sig signed)
+                :timestamp (:timestamp signed) :body (:body signed)}
+        result (auth/verify-and-authorize
+                token root-pk
+                {:effect :read :domain "market" :method :get :path "/market/clock"}
+                sig {} {:proxy-identity "proxy-b:9090"})]
+    (is (not (:authorized result)))
+    (is (.contains (:reason result) "Audience mismatch"))))
+
+(deftest audience-not-set-passes
+  (testing "No audience in envelope, no proxy-identity → passes"
+    (let [token  (issue-bound #{:read} #{"market"})
+          signed (auth/sign-request :get "/market/clock" {} agent-kp)
+          sig    {:agent-key (:agent-key signed) :sig (:sig signed)
+                  :timestamp (:timestamp signed) :body (:body signed)}
+          result (auth/verify-and-authorize
+                  token root-pk
+                  {:effect :read :domain "market" :method :get :path "/market/clock"}
+                  sig {} {})]
+      (is (:authorized result)))))
+
+;; ---------------------------------------------------------------------------
 ;; Hex utilities
 ;; ---------------------------------------------------------------------------
 
@@ -227,3 +266,127 @@
         hex      (auth/bytes->hex original)
         back     (auth/hex->bytes hex)]
     (is (= (seq original) (seq back)))))
+
+;; ---------------------------------------------------------------------------
+;; SDSI group authorization
+;; ---------------------------------------------------------------------------
+
+(def agent2-kp (auth/generate-keypair))
+(def agent2-pk-bytes (crypto/encode-public-key (:pub agent2-kp)))
+
+(def test-roster
+  {"traders"  [(auth/bytes->hex agent-pk-bytes)
+               (auth/bytes->hex agent2-pk-bytes)]
+   "monitors" [(auth/bytes->hex agent-pk-bytes)]})
+
+(defn issue-group [rights]
+  (auth/issue-group-token root-kp {:rights rights}))
+
+(defn make-sig-meta [method path body kp]
+  (let [signed (auth/sign-request method path body kp)]
+    {:agent-key (:agent-key signed)
+     :sig       (:sig signed)
+     :timestamp (:timestamp signed)
+     :body      (:body signed)}))
+
+(deftest sdsi-group-member-allowed
+  (let [token  (issue-group [["traders" :read "market"]])
+        req    {:effect :read :domain "market"
+                :method :get :path "/market/clock"}
+        sig    (make-sig-meta :get "/market/clock" {} agent-kp)
+        result (auth/verify-and-authorize
+                token root-pk req sig {} {:roster test-roster})]
+    (is (:authorized result))
+    (is (:sdsi-group result))))
+
+(deftest sdsi-second-group-member-allowed
+  (let [token  (issue-group [["traders" :read "market"]])
+        req    {:effect :read :domain "market"
+                :method :get :path "/market/clock"}
+        sig    (make-sig-meta :get "/market/clock" {} agent2-kp)
+        result (auth/verify-and-authorize
+                token root-pk req sig {} {:roster test-roster})]
+    (is (:authorized result))
+    (is (:sdsi-group result))))
+
+(deftest sdsi-non-member-denied
+  (let [token  (issue-group [["traders" :read "market"]])
+        req    {:effect :read :domain "market"
+                :method :get :path "/market/clock"}
+        sig    (make-sig-meta :get "/market/clock" {} rogue-kp)
+        result (auth/verify-and-authorize
+                token root-pk req sig {} {:roster test-roster})]
+    (is (not (:authorized result)))
+    (is (.contains (:reason result) "not in any group"))))
+
+(deftest sdsi-wrong-effect-denied
+  (let [token  (issue-group [["traders" :read "market"]])
+        req    {:effect :write :domain "market"
+                :method :post :path "/market/quote"}
+        sig    (make-sig-meta :post "/market/quote" {:symbol "AAPL"} agent-kp)
+        result (auth/verify-and-authorize
+                token root-pk req sig {:symbol "AAPL"} {:roster test-roster})]
+    (is (not (:authorized result)))))
+
+(deftest sdsi-wrong-domain-denied
+  (let [token  (issue-group [["traders" :read "market"]])
+        req    {:effect :read :domain "account"
+                :method :get :path "/account/info"}
+        sig    (make-sig-meta :get "/account/info" {} agent-kp)
+        result (auth/verify-and-authorize
+                token root-pk req sig {} {:roster test-roster})]
+    (is (not (:authorized result)))))
+
+(deftest sdsi-multiple-rights
+  (let [token  (issue-group [["traders" :read "market"]
+                             ["traders" :write "trade"]])
+        req1   {:effect :read :domain "market"
+                :method :get :path "/market/clock"}
+        req2   {:effect :write :domain "trade"
+                :method :post :path "/trade/place-order"}]
+    (testing "read market allowed"
+      (let [sig (make-sig-meta :get "/market/clock" {} agent-kp)
+            r   (auth/verify-and-authorize
+                 token root-pk req1 sig {} {:roster test-roster})]
+        (is (:authorized r))))
+    (testing "write trade allowed"
+      (let [sig (make-sig-meta :post "/trade/place-order"
+                               {:symbol "AAPL" :side "buy"} agent-kp)
+            r   (auth/verify-and-authorize
+                 token root-pk req2 sig {:symbol "AAPL" :side "buy"}
+                 {:roster test-roster})]
+        (is (:authorized r))))))
+
+(deftest sdsi-no-roster-returns-error
+  (let [token  (issue-group [["traders" :read "market"]])
+        req    {:effect :read :domain "market"
+                :method :get :path "/market/clock"}
+        sig    (make-sig-meta :get "/market/clock" {} agent-kp)
+        result (auth/verify-and-authorize token root-pk req sig {})]
+    (is (not (:authorized result)))
+    (is (.contains (:reason result) "roster"))))
+
+(deftest sdsi-no-signature-returns-error
+  (let [token  (issue-group [["traders" :read "market"]])
+        result (auth/verify-and-authorize
+                token root-pk {:effect :read :domain "market"})]
+    (is (not (:authorized result)))
+    (is (.contains (:reason result) "signed request"))))
+
+(deftest sdsi-monitors-group-separate
+  (testing "agent1 is in monitors, agent2 is not"
+    (let [token (issue-group [["monitors" :read "account"]])]
+      ;; agent1 in monitors → allowed
+      (let [sig (make-sig-meta :get "/account/info" {} agent-kp)
+            r   (auth/verify-and-authorize
+                 token root-pk
+                 {:effect :read :domain "account" :method :get :path "/account/info"}
+                 sig {} {:roster test-roster})]
+        (is (:authorized r)))
+      ;; agent2 NOT in monitors → denied
+      (let [sig (make-sig-meta :get "/account/info" {} agent2-kp)
+            r   (auth/verify-and-authorize
+                 token root-pk
+                 {:effect :read :domain "account" :method :get :path "/account/info"}
+                 sig {} {:roster test-roster})]
+        (is (not (:authorized r)))))))

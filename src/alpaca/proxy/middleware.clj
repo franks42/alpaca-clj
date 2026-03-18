@@ -48,10 +48,12 @@
   ([handler public-key]
    (wrap-stroopwafel-auth handler public-key nil))
   ([handler public-key roster]
+   (wrap-stroopwafel-auth handler public-key roster nil))
+  ([handler public-key roster proxy-identity]
    ((pep/create-pep
      {:canonicalize  http-edn/canonicalize
       :extract-creds http-edn/extract-creds
-      :authorize     (http-edn/make-authorize roster)
+      :authorize     (http-edn/make-authorize roster proxy-identity)
       :exempt?       http-edn/exempt?
       :public-key    public-key})
     handler)))

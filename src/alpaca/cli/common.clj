@@ -52,7 +52,8 @@
       (do (require 'alpaca.auth)
           (let [sign-req      @(resolve 'alpaca.auth/sign-request)
                 serialize-sig @(resolve 'alpaca.auth/serialize-signed-request)
-                signed        (sign-req method path body agent-kp)
+                audience      (System/getenv "PROXY_IDENTITY")
+                signed        (sign-req method path body agent-kp audience)
                 sig-str       (serialize-sig signed)]
             (assoc headers "X-Agent-Signature" sig-str)))
       (do (binding [*out* *err*]

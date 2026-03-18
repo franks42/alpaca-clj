@@ -75,10 +75,11 @@
         (= uri "/api"))))
 
 (defn make-authorize
-  "Create an authorize function with optional roster for SDSI group support.
+  "Create an authorize function with optional roster and proxy-identity.
    Returns (fn [token-str public-key canonical sig-metadata body] → result)."
-  ([] (make-authorize nil))
-  ([roster]
+  ([] (make-authorize nil nil))
+  ([roster] (make-authorize roster nil))
+  ([roster proxy-identity]
    (fn [token-str public-key canonical sig-metadata body]
      (auth/verify-and-authorize
       token-str public-key
@@ -88,4 +89,4 @@
        :path   (:path canonical)}
       sig-metadata
       body
-      {:roster roster}))))
+      {:roster roster :proxy-identity proxy-identity}))))

@@ -95,7 +95,8 @@
                         (= auth-mode :stroopwafel)
                          (mw/wrap-stroopwafel-auth
                           (auth/import-public-key (:stroopwafel-root-key config))
-                          (:roster config))
+                          (:roster config)
+                          (:proxy-identity config))
 
                          (= auth-mode :token)
                          (mw/wrap-simple-auth (:proxy-token config)))
@@ -118,12 +119,26 @@
                      :host  host}]
     (reset! server-instance instance)
     (write-pid-file! actual-port)
+    ;; Trust-state declaration at startup — auditable record of what
+    ;; this proxy instance trusts and how it's configured
+    (log/log! {:level :info :id ::trust-state
+               :msg   "Proxy trust configuration"
+               :data  (cond-> {:auth-mode auth-mode
+                               :paper     (:paper? config)
+                               :trading-url (:trading-url config)}
+                        (= auth-mode :stroopwafel)
+                        (assoc :root-key-fp (subs (:stroopwafel-root-key config) 0
+                                                  (min 16 (count (:stroopwafel-root-key config)))))
+                        (:roster config)
+                        (assoc :roster-groups (vec (keys (:roster config)))
+                               :roster-source (or (System/getenv "STROOPWAFEL_ROSTER")
+                                                  ".stroopwafel-roster.edn"))
+                        (= auth-mode :none)
+                        (assoc :warning "NO AUTH — development mode only"))})
     (log/log! {:level :info :id ::server-started
                :msg   "alpaca-clj proxy started"
                :data  {:host  host
                        :port  actual-port
-                       :paper (:paper? config)
-                       :auth  auth-mode
                        :routes (mapv (fn [op]
                                        {:route  (:route op)
                                         :method (name (:method op))
