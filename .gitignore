@@ -16,3 +16,4 @@ pom.xml.asc
 !.env.example
 .alpaca-proxy.pid
 .stroopwafel-root.edn
+.stroopwafel-agent.edn

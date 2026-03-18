@@ -154,14 +154,29 @@ bb server:status             # check if running
 
 **Bearer tokens only (currently).** The proxy currently uses bearer tokens — whoever holds the token can use it. Stroopwafel 0.8.0 now supports requester-bound tokens via signed requests, but this is not yet wired into the proxy middleware.
 
-**Requester-bound tokens** (available in stroopwafel 0.8.0, proxy integration planned for Phase 5):
-- Token carries `[:authorized-agent-key <agent-public-key>]` — bound to a specific agent's Ed25519 key
-- Agent signs each request with its private key via `stroopwafel.request/sign-request`
-- Proxy verifies signature via `stroopwafel.request/verify-request`, then Datalog join confirms the key matches
-- Stolen token is useless without the agent's private key
-- This is SPKI's subject-key binding model expressed as Datalog facts
+**Requester-bound tokens** (stroopwafel 0.8.0, integrated):
 
-Current mitigations: tokens are sealed (can't expand authority), sessions should be short-lived, and the proxy logs every request for audit.
+```bash
+# 1. Generate agent keypair
+bb token generate-agent-keys
+
+# 2. Issue token bound to agent
+bb token issue --effects read --domains market --agent-key <hex>
+
+# 3. Agent signs every request
+export STROOPWAFEL_AGENT_SIGN=true
+bb api market/quote --symbol AAPL    # agent signs automatically
+```
+
+How it works:
+- Token carries `[:authorized-agent-key <agent-public-key>]` — bound to a specific agent's Ed25519 key
+- Agent signs each request with its private key; signature goes in `X-Agent-Signature` header
+- Proxy verifies signature, then Datalog join confirms the key in the signature matches the key in the token
+- **Stolen token is useless without the agent's private key**
+- Bearer-only request with a bound token → 403 "requires signed request"
+- Wrong agent key → 403 "Token not bound to this agent key"
+
+Backwards compatible: tokens without `[:authorized-agent-key ...]` work as bearer tokens (no signature required).
 
 ## Key Design Decisions
 

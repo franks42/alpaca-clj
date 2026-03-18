@@ -1,11 +1,13 @@
 (ns alpaca.proxy.middleware
   "Ring middleware for the proxy server.
-   Supports two auth modes:
-   - Simple: PROXY_TOKEN env var (phase 1 / development)
-   - Stroopwafel: capability token verification (phase 2 / production)"
+   Supports three auth modes:
+   - Simple: PROXY_TOKEN env var (development)
+   - Stroopwafel bearer: capability token (production)
+   - Stroopwafel requester-bound: token + signed request (highest security)"
   (:require [alpaca.proxy.log :as log]
             [alpaca.schema :as schema]
-            [alpaca.auth :as auth]))
+            [alpaca.auth :as auth]
+            [clojure.edn :as edn]))
 
 (defn wrap-edn-content-type
   "Set Content-Type: application/edn on all responses."
@@ -20,6 +22,13 @@
   (let [auth-header (get-in req [:headers "authorization"] "")]
     (when (.startsWith auth-header "Bearer ")
       (subs auth-header 7))))
+
+(defn- read-body-string
+  "Read request body as a string, preserving it for downstream handlers."
+  [req]
+  (when-let [body (:body req)]
+    (let [s (if (string? body) body (slurp body))]
+      (when-not (empty? s) s))))
 
 (defn wrap-simple-auth
   "Simple auth: check Bearer token against PROXY_TOKEN env var.
@@ -37,12 +46,12 @@
 
 (defn wrap-stroopwafel-auth
   "Stroopwafel capability token auth.
-   Verifies token signature and checks that the token grants
-   the required effect class and domain for the requested operation.
+   Verifies token signature and checks effect class + domain grants.
 
-   Arguments:
-     handler    — next ring handler
-     public-key — root public key for token verification
+   Supports two modes:
+   - Bearer-only: just Authorization header (token is bearer)
+   - Requester-bound: Authorization + X-Agent-Signature headers
+     (token bound to agent key, agent signs each request)
 
    Skips auth for /health and /api endpoints."
   [handler public-key]
@@ -64,11 +73,22 @@
             (handler req)
 
             :else
-            (let [domain (namespace (:name op))
-                  effect (:effect op)
-                  result (auth/verify-and-authorize
-                          token-str public-key
-                          {:effect effect :domain domain})]
+            (let [domain       (namespace (:name op))
+                  effect       (:effect op)
+                  sig-header   (get-in req [:headers "x-agent-signature"])
+                  sig-metadata (when sig-header
+                                 (auth/deserialize-sig-metadata sig-header))
+                  body-str     (when sig-metadata (read-body-string req))
+                  body-edn     (if body-str (edn/read-string body-str) {})
+                  result       (auth/verify-and-authorize
+                                token-str public-key
+                                {:effect effect :domain domain}
+                                sig-metadata
+                                body-edn)
+                  ;; Re-attach body string for downstream handlers
+                  req          (if (and body-str (not (string? (:body req))))
+                                 (assoc req :body body-str)
+                                 req)]
               (if (:authorized result)
                 (handler req)
                 {:status 403
