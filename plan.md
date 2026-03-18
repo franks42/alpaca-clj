@@ -96,6 +96,13 @@ Stroopwafel 0.7.0 runs on bb. Token auth fully integrated.
 - [ ] Options: contracts, quotes, multi-leg orders
 - [ ] Account configuration
 
+### Phase 4b — Dual PEP / Client-Side Enforcement Demo
+- [ ] Add `audience` field to signed request envelope (proxy verifies it matches its identity)
+- [ ] Client-side PEP library: `alpaca.client-pep/check-outbound` — verify outbound policy before signing
+- [ ] Outbound capability token: approved destinations, data restrictions, operation routing
+- [ ] Cross-company demo: two proxies, two authorities, two independent policy chains
+- [ ] See `docs/dual-pep-client-server-enforcement.md`
+
 ### Phase 5 — Production Hardening
 - [ ] **Trust bootstrap via OS accounts** (see below)
 - [ ] Audit log (append-only, cryptographic chaining)
