@@ -94,6 +94,30 @@
         sealed       (sw/seal token)]
     (serialize-token sealed)))
 
+(defn issue-group-token
+  "Issue a capability token for SDSI group-based authorization.
+
+   Arguments:
+     root-kp — root keypair {:priv :pub}
+     grants  — map of grants:
+       :rights — vector of [group-name effect domain] triples
+
+   Example:
+     (issue-group-token root-kp
+       {:rights [[\"traders\" :read \"market\"]
+                 [\"traders\" :write \"trade\"]]})
+
+   Returns: sealed token string (CEDN) ready for Bearer header."
+  [root-kp {:keys [rights]}]
+  (let [right-facts (mapv (fn [[group effect domain]]
+                            [:right group effect domain])
+                          rights)
+        token       (sw/issue
+                     {:facts right-facts}
+                     {:private-key (:priv root-kp)})
+        sealed      (sw/seal token)]
+    (serialize-token sealed)))
+
 ;; ---------------------------------------------------------------------------
 ;; Request envelope signing (agent side)
 ;; ---------------------------------------------------------------------------
@@ -212,6 +236,76 @@
                     " access to " domain)
        :explain (:explain result)})))
 
+(defn- roster-facts
+  "Convert a roster map into [:named-key group pk-bytes] Datalog facts.
+   Roster format: {\"traders\" [\"hex1\" \"hex2\"], \"monitors\" [\"hex3\"]}"
+  [roster]
+  (when roster
+    (into []
+          (mapcat (fn [[group-name key-hexes]]
+                    (map (fn [hex] [:named-key group-name (hex->bytes hex)])
+                         key-hexes)))
+          roster)))
+
+(defn- check-sdsi-group
+  "Evaluate a token with SDSI group-based authorization.
+   Token carries [:right group-name :effect domain].
+   Roster provides [:named-key group-name pk-bytes].
+   Datalog resolves: name→key→verified-key→authenticated-as→right."
+  [token effect domain sig-metadata actual-method actual-path actual-body roster]
+  (let [signed-envelope (:body sig-metadata)
+        signed-req      (assoc sig-metadata :body signed-envelope)
+        verified-key    (sw-req/verify-request signed-req)]
+    (if-not verified-key
+      {:authorized false :reason "Request signature verification failed"}
+      (let [env-method (:method signed-envelope)
+            env-path   (:path signed-envelope)
+            env-body   (:body signed-envelope)
+            env-req-id (:request-id signed-envelope)]
+        (cond
+          (not= env-method (name actual-method))
+          {:authorized false
+           :reason (str "Signed method '" env-method
+                        "' does not match actual method '" (name actual-method) "'")}
+
+          (not= env-path actual-path)
+          {:authorized false
+           :reason (str "Signed path '" env-path
+                        "' does not match actual path '" actual-path "'")}
+
+          (not= env-body (or actual-body {}))
+          {:authorized false
+           :reason "Signed body does not match actual request body"}
+
+          :else
+          (if-let [err (check-freshness env-req-id)]
+            {:authorized false :reason err}
+            (if-let [err (check-replay env-req-id)]
+              {:authorized false :reason err}
+              (let [name-facts (roster-facts roster)
+                    result (sw/evaluate token
+                                        :explain? true
+                                        :authorizer
+                                        {:facts (into [[:request-verified-agent-key verified-key]]
+                                                      name-facts)
+                                         :rules [{:id   :resolve-name
+                                                  :head [:authenticated-as '?name]
+                                                  :body [[:named-key '?name '?k]
+                                                         [:request-verified-agent-key '?k]]}]
+                                         :policies [{:kind :allow
+                                                     :query [[:authenticated-as '?name]
+                                                             [:right '?name effect domain]]}]})]
+                (if (:valid? result)
+                  {:authorized true
+                   :requester-bound true
+                   :sdsi-group true
+                   :request-id env-req-id
+                   :agent-key-fp (agent-key-fingerprint verified-key)}
+                  {:authorized false
+                   :reason (str "Agent not in any group with " (name effect)
+                                " access to " domain)
+                   :explain (:explain result)})))))))))
+
 (defn- check-requester-bound
   "Evaluate a requester-bound token with signed request verification.
    Verifies: signature, envelope contents match actual request,
@@ -291,27 +385,49 @@
      sig-metadata — (optional) deserialized signature metadata from X-Agent-Signature header
      request-body — (optional) the EDN request body (for envelope verification)
 
+   Options map keys:
+     :roster — (optional) group roster for SDSI-style authorization
+
    Returns:
      {:authorized true} or {:authorized false :reason \"...\"}."
   ([token-str public-key request]
-   (verify-and-authorize token-str public-key request nil nil))
-  ([token-str public-key {:keys [effect domain method path]} sig-metadata request-body]
+   (verify-and-authorize token-str public-key request nil nil nil))
+  ([token-str public-key request sig-metadata request-body]
+   (verify-and-authorize token-str public-key request sig-metadata request-body nil))
+  ([token-str public-key {:keys [effect domain method path]} sig-metadata request-body
+    {:keys [roster] :as _opts}]
    (try
-     (let [token (deserialize-token token-str)]
+     (let [token (deserialize-token token-str)
+           facts (get-in token [:blocks 0 :facts])]
        ;; 1. Verify cryptographic integrity
        (if-not (sw/verify token {:public-key public-key})
          {:authorized false :reason "Token signature verification failed"}
 
-         ;; 2. Check if token has agent binding
-         (let [has-agent-key? (some #(= :authorized-agent-key (first %))
-                                    (get-in token [:blocks 0 :facts]))]
+         ;; 2. Detect token type from facts
+         (let [has-agent-key? (some #(= :authorized-agent-key (first %)) facts)
+               has-right?     (some #(= :right (first %)) facts)]
            (cond
-             ;; Token is requester-bound but no signature provided
+             ;; SDSI group token — has [:right ...] facts, needs roster + signature
+             (and has-right? sig-metadata roster)
+             (do (evict-expired-cache-entries!)
+                 (check-sdsi-group token effect domain sig-metadata
+                                   method path request-body roster))
+
+             ;; SDSI group token but missing signature
+             (and has-right? (nil? sig-metadata))
+             {:authorized false
+              :reason "Group token requires signed request (X-Agent-Signature header missing)"}
+
+             ;; SDSI group token but no roster configured
+             (and has-right? (nil? roster))
+             {:authorized false
+              :reason "Group token requires roster configuration (STROOPWAFEL_ROSTER)"}
+
+             ;; SPKI requester-bound — has [:authorized-agent-key ...], needs signature
              (and has-agent-key? (nil? sig-metadata))
              {:authorized false
               :reason "Token requires signed request (X-Agent-Signature header missing)"}
 
-             ;; Token is requester-bound and signature provided
              (and has-agent-key? sig-metadata)
              (do (evict-expired-cache-entries!)
                  (check-requester-bound token effect domain sig-metadata

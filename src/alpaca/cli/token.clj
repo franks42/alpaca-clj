@@ -65,6 +65,12 @@
                                     :agent-key agent-key-bytes})]
     (println token)))
 
+(defn- cmd-issue-group [{:keys [group effects domains]}]
+  (let [kp     (load-root-keypair)
+        rights (for [e effects d domains] [group e d])
+        token  (auth/issue-group-token kp {:rights (vec rights)})]
+    (println token)))
+
 (defn- cmd-inspect [token-str]
   (try
     (let [token (auth/deserialize-token token-str)]
@@ -112,6 +118,16 @@
                     :domains domains
                     :agent-key (:agent-key flags)}))
 
+      "issue-group"
+      (let [group   (or (:group flags) "traders")
+            effects (if (:effects flags)
+                      (set (map keyword (str/split (:effects flags) #",")))
+                      #{:read})
+            domains (if (:domains flags)
+                      (set (str/split (:domains flags) #","))
+                      #{"market" "account" "trade"})]
+        (cmd-issue-group {:group group :effects effects :domains domains}))
+
       "inspect"
       (if-let [token-str (first rest-args)]
         (cmd-inspect token-str)
@@ -123,4 +139,5 @@
           (println "  generate-agent-keys  Generate agent keypair")
           (println "  issue-read-only      Issue bearer read-only token (all domains)")
           (println "  issue                Issue token with --effects, --domains, --agent-key")
+          (println "  issue-group          Issue SDSI group token --group <name> --effects --domains")
           (println "  inspect              Show token contents")))))

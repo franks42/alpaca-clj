@@ -94,7 +94,8 @@
                        (cond->
                         (= auth-mode :stroopwafel)
                          (mw/wrap-stroopwafel-auth
-                          (auth/import-public-key (:stroopwafel-root-key config)))
+                          (auth/import-public-key (:stroopwafel-root-key config))
+                          (:roster config))
 
                          (= auth-mode :token)
                          (mw/wrap-simple-auth (:proxy-token config)))

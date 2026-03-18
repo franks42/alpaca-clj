@@ -42,15 +42,19 @@
    - Exempt: /health and /api bypass auth
 
    The canonicalization step is explicit and auditable — it defines the
-   binding between the wire format and the policy evaluation."
-  [handler public-key]
-  ((pep/create-pep
-    {:canonicalize  http-edn/canonicalize
-     :extract-creds http-edn/extract-creds
-     :authorize     http-edn/authorize
-     :exempt?       http-edn/exempt?
-     :public-key    public-key})
-   handler))
+   binding between the wire format and the policy evaluation.
+
+   Optional roster for SDSI group-based authorization."
+  ([handler public-key]
+   (wrap-stroopwafel-auth handler public-key nil))
+  ([handler public-key roster]
+   ((pep/create-pep
+     {:canonicalize  http-edn/canonicalize
+      :extract-creds http-edn/extract-creds
+      :authorize     (http-edn/make-authorize roster)
+      :exempt?       http-edn/exempt?
+      :public-key    public-key})
+    handler)))
 
 (defn wrap-error-handler
   "Catch exceptions and return EDN error responses."

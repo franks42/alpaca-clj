@@ -74,15 +74,18 @@
     (or (= uri "/health")
         (= uri "/api"))))
 
-(defn authorize
-  "Authorize using stroopwafel verify-and-authorize.
-   Wraps alpaca.auth/verify-and-authorize with the canonical envelope."
-  [token-str public-key canonical sig-metadata body]
-  (auth/verify-and-authorize
-   token-str public-key
-   {:effect (:effect canonical)
-    :domain (:domain canonical)
-    :method (keyword (:method canonical))
-    :path   (:path canonical)}
-   sig-metadata
-   body))
+(defn make-authorize
+  "Create an authorize function with optional roster for SDSI group support.
+   Returns (fn [token-str public-key canonical sig-metadata body] → result)."
+  ([] (make-authorize nil))
+  ([roster]
+   (fn [token-str public-key canonical sig-metadata body]
+     (auth/verify-and-authorize
+      token-str public-key
+      {:effect (:effect canonical)
+       :domain (:domain canonical)
+       :method (keyword (:method canonical))
+       :path   (:path canonical)}
+      sig-metadata
+      body
+      {:roster roster}))))
