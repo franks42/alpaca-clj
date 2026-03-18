@@ -86,3 +86,33 @@
   (let [handler (make-handler)
         resp    (handler (request :get "/health"))]
     (is (.contains (get-in resp [:headers "Content-Type"]) "application/edn"))))
+
+;; ---------------------------------------------------------------------------
+;; Schema validation
+;; ---------------------------------------------------------------------------
+
+(deftest wrong-type-returns-400
+  (let [handler (make-handler)]
+    (testing "limit must be integer"
+      (let [resp (handler (request :post "/market/bars"
+                                   {:symbol "AAPL" :limit "not-a-number"}))]
+        (is (= 400 (:status resp)))
+        (is (.contains (:error (parse-body resp)) "integer"))))
+    (testing "string coerced from number"
+      (let [resp (handler (request :post "/market/quote" {:symbol 123}))]
+        ;; symbol is :string type — numbers should coerce to string
+        (is (not= 400 (:status resp)))))))
+
+(deftest unknown-param-returns-400
+  (let [handler (make-handler)
+        resp    (handler (request :post "/market/quote"
+                                  {:symbol "AAPL" :bogus "value"}))]
+    (is (= 400 (:status resp)))
+    (is (.contains (:error (parse-body resp)) "Unknown parameter"))))
+
+(deftest integer-coercion-from-string
+  (let [handler (make-handler)
+        resp    (handler (request :post "/market/bars"
+                                  {:symbol "AAPL" :limit "5"}))]
+    ;; "5" should coerce to 5 — not rejected
+    (is (not= 400 (:status resp)))))

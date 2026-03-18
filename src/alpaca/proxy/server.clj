@@ -33,6 +33,41 @@
         {:pid  (parse-long pid-str)
          :port (parse-long port-str)}))))
 
+(defn- validate-config!
+  "Validate configuration at startup. Fail fast on missing or invalid values."
+  [config]
+  ;; Alpaca credentials
+  (when-not (:api-key-id config)
+    (log/log! {:level :fatal :id ::missing-api-key
+               :msg "APCA_API_KEY_ID not set — cannot connect to Alpaca"})
+    (throw (ex-info "Missing APCA_API_KEY_ID" {:type :config-error})))
+  (when-not (:api-secret-key config)
+    (log/log! {:level :fatal :id ::missing-api-secret
+               :msg "APCA_API_SECRET_KEY not set — cannot connect to Alpaca"})
+    (throw (ex-info "Missing APCA_API_SECRET_KEY" {:type :config-error})))
+
+  ;; Stroopwafel root key format
+  (when-let [root-key (:stroopwafel-root-key config)]
+    (when (< (count root-key) 20)
+      (log/log! {:level :fatal :id ::malformed-root-key
+                 :msg "STROOPWAFEL_ROOT_KEY appears malformed (too short)"
+                 :data {:length (count root-key)}})
+      (throw (ex-info "Malformed STROOPWAFEL_ROOT_KEY" {:type :config-error})))
+    ;; Verify it can be parsed as a public key
+    (try
+      (auth/import-public-key root-key)
+      (catch Exception e
+        (log/log! {:level :fatal :id ::invalid-root-key
+                   :msg "STROOPWAFEL_ROOT_KEY is not a valid Ed25519 public key"
+                   :data {:error (.getMessage e)}})
+        (throw (ex-info "Invalid STROOPWAFEL_ROOT_KEY" {:type :config-error})))))
+
+  ;; Paper vs live safety
+  (when-not (:paper? config)
+    (log/log! {:level :warn :id ::live-trading-active
+               :msg "*** LIVE TRADING MODE — real money at risk ***"
+               :data {:trading-url (:trading-url config)}})))
+
 (defn start-server!
   "Start the proxy server.
 
@@ -47,6 +82,7 @@
     ((:stop! @server-instance)))
 
   (let [config     (merge (config/load-config) config-override)
+        _          (validate-config! config)
         port       (or port (:proxy-port config))
         host       (or host (:proxy-host config))
         auth-mode  (cond
