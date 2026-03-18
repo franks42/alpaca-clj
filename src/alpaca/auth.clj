@@ -1,14 +1,16 @@
 (ns alpaca.auth
   "Stroopwafel token authentication for the proxy.
-   Handles token serialization, verification, and authorization.
 
    Two auth modes:
-   - Bearer-only: token in Authorization header (current)
-   - Requester-bound: token + signed request (agent key in token,
-     agent signs each request, Datalog join verifies key match)"
+   - Bearer-only: token in Authorization header
+   - Requester-bound: token + signed request envelope
+
+   Signed request envelopes include method, path, body, and a UUIDv7
+   request-id that serves as both timestamp and nonce for replay protection."
   (:require [stroopwafel.core :as sw]
             [stroopwafel.crypto :as sw-crypto]
             [stroopwafel.request :as sw-req]
+            [com.github.franks42.uuidv7.core :as uuidv7]
             [cedn.core :as cedn] ;; cedn/readers used at runtime
             [clojure.edn :as edn]
             [taoensso.trove :as log]))
@@ -77,7 +79,7 @@
      root-kp      — root keypair {:priv :pub}
      grants       — map of grants:
        :effects     — set of allowed effect classes #{:read :write :destroy}
-       :domains     — set of allowed domains #{\"market\" \"account\" \"trading\"}
+       :domains     — set of allowed domains #{\"market\" \"account\" \"trade\"}
        :agent-key   — (optional) agent public key bytes for requester binding
 
    Returns: sealed token string (CEDN) ready for Bearer header."
@@ -93,25 +95,93 @@
     (serialize-token sealed)))
 
 ;; ---------------------------------------------------------------------------
-;; Request signing (agent side)
+;; Request envelope signing (agent side)
 ;; ---------------------------------------------------------------------------
 
 (defn sign-request
-  "Sign a request body with the agent's private key.
-   Returns a signed request map with :body :agent-key :sig :timestamp."
-  [body agent-kp]
-  (sw-req/sign-request body (:priv agent-kp) (:pub agent-kp)))
+  "Sign a request envelope with the agent's private key.
+
+   The envelope includes method, path, body, and a UUIDv7 request-id.
+   The request-id serves as both timestamp (ms precision, extractable)
+   and nonce (guaranteed unique, for replay protection).
+
+   Arguments:
+     method   — HTTP method keyword (:get, :post)
+     path     — route path string (\"/market/quote\")
+     body     — EDN map (request body, or {} for GET)
+     agent-kp — agent keypair {:priv :pub}
+
+   Returns: signed request map from stroopwafel.request."
+  [method path body agent-kp]
+  (let [envelope {:method     (name method)
+                  :path       path
+                  :body       (or body {})
+                  :request-id (str (uuidv7/uuidv7))}]
+    (sw-req/sign-request envelope (:priv agent-kp) (:pub agent-kp))))
 
 (defn serialize-signed-request
-  "Serialize the signature metadata (agent-key, sig, timestamp) as CEDN.
-   The body is already in the HTTP request — only sig metadata goes in the header."
+  "Serialize the signature metadata (agent-key, sig, timestamp, and the
+   full envelope) as CEDN for the X-Agent-Signature header."
   [signed-req]
-  (cedn/canonical-str (select-keys signed-req [:agent-key :sig :timestamp])))
+  (cedn/canonical-str (select-keys signed-req [:agent-key :sig :timestamp :body])))
 
 (defn deserialize-sig-metadata
   "Deserialize signature metadata from header value."
   [s]
   (edn/read-string {:readers cedn/readers} s))
+
+;; ---------------------------------------------------------------------------
+;; Replay protection
+;; ---------------------------------------------------------------------------
+
+(def ^:private replay-cache
+  "Cache of recently seen request-ids. Keyed by request-id string.
+   Entries expire after the freshness window."
+  (atom {}))
+
+(def ^:private freshness-window-ms
+  "Maximum age of a signed request before it's rejected (2 minutes)."
+  120000)
+
+(defn- check-freshness
+  "Check that the request-id's embedded timestamp is within the freshness window.
+   Returns nil if OK, or error string if stale."
+  [request-id-str]
+  (try
+    (let [request-id (parse-uuid request-id-str)]
+      (if-not (uuidv7/uuidv7? request-id)
+        "request-id is not a valid UUIDv7"
+        (let [ts  (uuidv7/extract-ts request-id)
+              now (System/currentTimeMillis)
+              age (- now ts)]
+          (cond
+            (> age freshness-window-ms)
+            (str "Request too old: " age "ms (max " freshness-window-ms "ms)")
+
+            (< age -5000)
+            (str "Request timestamp is in the future: " (- age) "ms")
+
+            :else nil))))
+    (catch Exception e
+      (str "Invalid request-id: " (.getMessage e)))))
+
+(defn- check-replay
+  "Check that the request-id has not been seen before.
+   Returns nil if OK, or error string if replay detected."
+  [request-id-str]
+  (if (contains? @replay-cache request-id-str)
+    "Replay detected: request-id already seen"
+    (do
+      (swap! replay-cache assoc request-id-str (System/currentTimeMillis))
+      nil)))
+
+(defn- evict-expired-cache-entries!
+  "Remove replay cache entries older than the freshness window."
+  []
+  (let [cutoff (- (System/currentTimeMillis) freshness-window-ms)]
+    (swap! replay-cache
+           (fn [cache]
+             (into {} (filter (fn [[_ ts]] (> ts cutoff)) cache))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Token verification and authorization
@@ -135,32 +205,68 @@
                     " access to " domain)})))
 
 (defn- check-requester-bound
-  "Evaluate a requester-bound token with signed request verification."
-  [token effect domain sig-metadata request-body]
-  (let [;; Reconstruct the signed request for verification
-        signed-req (assoc sig-metadata :body request-body)
+  "Evaluate a requester-bound token with signed request verification.
+   Verifies: signature, envelope contents match actual request,
+   freshness, and replay protection."
+  [token effect domain sig-metadata actual-method actual-path actual-body]
+  (let [;; The signed envelope is in sig-metadata :body (what the agent signed)
+        signed-envelope (:body sig-metadata)
+        signed-req      (assoc sig-metadata :body signed-envelope)
+
+        ;; 1. Verify cryptographic signature
         verified-key (sw-req/verify-request signed-req)]
     (if-not verified-key
       {:authorized false :reason "Request signature verification failed"}
-      (let [result (sw/evaluate token
-                                :authorizer
-                                {:facts [[:requested-effect effect]
-                                         [:requested-domain domain]
-                                         [:request-verified-agent-key verified-key]]
-                                 :rules [{:id   :agent-bound
-                                          :head [:agent-can-act '?k]
-                                          :body [[:authorized-agent-key '?k]
-                                                 [:request-verified-agent-key '?k]]}]
-                                 :checks [{:id    :check-effect
-                                           :query [[:effect effect]]}
-                                          {:id    :check-domain
-                                           :query [[:domain domain]]}]
-                                 :policies [{:kind :allow
-                                             :query [[:agent-can-act '?k]]}]})]
-        (if (:valid? result)
-          {:authorized true :requester-bound true}
+
+      ;; 2. Verify envelope matches actual HTTP request
+      (let [env-method (:method signed-envelope)
+            env-path   (:path signed-envelope)
+            env-body   (:body signed-envelope)
+            env-req-id (:request-id signed-envelope)]
+        (cond
+          (not= env-method (name actual-method))
           {:authorized false
-           :reason "Token not bound to this agent key"})))))
+           :reason (str "Signed method '" env-method
+                        "' does not match actual method '" (name actual-method) "'")}
+
+          (not= env-path actual-path)
+          {:authorized false
+           :reason (str "Signed path '" env-path
+                        "' does not match actual path '" actual-path "'")}
+
+          (not= env-body (or actual-body {}))
+          {:authorized false
+           :reason "Signed body does not match actual request body"}
+
+          ;; 3. Check freshness (UUIDv7 timestamp)
+          :else
+          (if-let [err (check-freshness env-req-id)]
+            {:authorized false :reason err}
+
+            ;; 4. Check replay (UUIDv7 as nonce)
+            (if-let [err (check-replay env-req-id)]
+              {:authorized false :reason err}
+
+              ;; 5. Evaluate Datalog authorization
+              (let [result (sw/evaluate token
+                                        :authorizer
+                                        {:facts [[:requested-effect effect]
+                                                 [:requested-domain domain]
+                                                 [:request-verified-agent-key verified-key]]
+                                         :rules [{:id   :agent-bound
+                                                  :head [:agent-can-act '?k]
+                                                  :body [[:authorized-agent-key '?k]
+                                                         [:request-verified-agent-key '?k]]}]
+                                         :checks [{:id    :check-effect
+                                                   :query [[:effect effect]]}
+                                                  {:id    :check-domain
+                                                   :query [[:domain domain]]}]
+                                         :policies [{:kind :allow
+                                                     :query [[:agent-can-act '?k]]}]})]
+                (if (:valid? result)
+                  {:authorized true :requester-bound true :request-id env-req-id}
+                  {:authorized false
+                   :reason "Token not bound to this agent key"})))))))))
 
 (defn verify-and-authorize
   "Verify token signature and evaluate authorization for a request.
@@ -168,15 +274,15 @@
    Arguments:
      token-str    — serialized token string (from Bearer header)
      public-key   — root public key
-     request      — map with :effect and :domain from the schema
+     request      — map with :effect, :domain, :method, :path from schema
      sig-metadata — (optional) deserialized signature metadata from X-Agent-Signature header
-     request-body — (optional) the EDN request body (for signature verification)
+     request-body — (optional) the EDN request body (for envelope verification)
 
    Returns:
      {:authorized true} or {:authorized false :reason \"...\"}."
   ([token-str public-key request]
    (verify-and-authorize token-str public-key request nil nil))
-  ([token-str public-key {:keys [effect domain]} sig-metadata request-body]
+  ([token-str public-key {:keys [effect domain method path]} sig-metadata request-body]
    (try
      (let [token (deserialize-token token-str)]
        ;; 1. Verify cryptographic integrity
@@ -194,7 +300,9 @@
 
              ;; Token is requester-bound and signature provided
              (and has-agent-key? sig-metadata)
-             (check-requester-bound token effect domain sig-metadata request-body)
+             (do (evict-expired-cache-entries!)
+                 (check-requester-bound token effect domain sig-metadata
+                                        method path request-body))
 
              ;; Bearer-only token
              :else

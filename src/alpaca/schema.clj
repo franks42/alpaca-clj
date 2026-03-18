@@ -65,10 +65,10 @@
                   :path   "/v2/stocks/bars"
                   :param-map {:symbol :symbols}}}
 
-   {:name        :trading/positions
+   {:name        :trade/positions
     :description "List all open positions: symbol, qty, entry price, P&L, market value."
     :effect      :read
-    :route       "/trading/positions"
+    :route       "/trade/positions"
     :method      :get
     :params      {}
     :alpaca      {:method :get

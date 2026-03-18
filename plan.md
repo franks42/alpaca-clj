@@ -178,6 +178,17 @@ Security properties:
 
 ---
 
+## TODO: Migrate to Stroopwafel
+
+The following alpaca-clj functionality should be reviewed for migration to the stroopwafel repo:
+
+- [ ] `alpaca.ssh` — SSH Ed25519 key import (standalone, no alpaca deps)
+- [ ] Request envelope signing (method + path + body + UUIDv7 request-id) — currently in `alpaca.auth/sign-request`, could generalize `stroopwafel.request/sign-request` to accept envelope structure
+- [ ] Replay protection (UUIDv7 freshness + nonce cache) — generic middleware, not alpaca-specific
+- [ ] `bytes->hex` / `hex->bytes` utilities — used everywhere, belong in `stroopwafel.crypto`
+
+---
+
 ## Dependencies
 
 | Library | Purpose | Source |
@@ -186,6 +197,7 @@ Security properties:
 | `cheshire` | JSON parsing (Alpaca REST) | Maven |
 | `cedn` | Canonical EDN serialization | `../canonical-edn` (local) |
 | `stroopwafel` | Capability token auth | `../stroopwafel` (local) |
+| `uuidv7` | Timestamp + nonce (replay protection) | Maven |
 
 ## Reference Projects
 
@@ -200,4 +212,4 @@ Security properties:
 
 ---
 
-*Status: Phase 0+1+2+3 complete (v0.3.1). Requester-bound tokens integrated. Phase 4 (extended coverage) or Phase 5 (production hardening) next.*
+*Status: Phase 0+1+2+3 complete (v0.4.0). Replay protection + envelope signing + domain normalization. Phase 4 or 5 next.*

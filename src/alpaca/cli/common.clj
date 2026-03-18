@@ -30,7 +30,6 @@
   []
   (let [f (java.io.File. ".stroopwafel-agent.edn")]
     (when (.exists f)
-      ;; Lazy-require to avoid loading stroopwafel for non-signed requests
       (require 'alpaca.auth)
       (require 'cedn.core)
       (let [readers    @(resolve 'cedn.core/readers)
@@ -44,16 +43,17 @@
 
 (defn- sign-and-add-header
   "If STROOPWAFEL_AGENT_SIGN=true and agent keypair exists,
-   sign the request body and add X-Agent-Signature header."
-  [headers body]
+   sign the request envelope (method + path + body + UUIDv7 request-id)
+   and add X-Agent-Signature header."
+  [headers method path body]
   (if-not (= "true" (System/getenv "STROOPWAFEL_AGENT_SIGN"))
     headers
     (if-let [agent-kp (load-agent-keypair)]
       (do (require 'alpaca.auth)
-          (let [sign-req       @(resolve 'alpaca.auth/sign-request)
-                serialize-sig  @(resolve 'alpaca.auth/serialize-signed-request)
-                signed         (sign-req (or body {}) agent-kp)
-                sig-str        (serialize-sig signed)]
+          (let [sign-req      @(resolve 'alpaca.auth/sign-request)
+                serialize-sig @(resolve 'alpaca.auth/serialize-signed-request)
+                signed        (sign-req method path body agent-kp)
+                sig-str       (serialize-sig signed)]
             (assoc headers "X-Agent-Signature" sig-str)))
       (do (binding [*out* *err*]
             (println "Warning: STROOPWAFEL_AGENT_SIGN=true but no .stroopwafel-agent.edn found"))
@@ -67,9 +67,8 @@
      path   — e.g. \"/market/quote\"
      body   — EDN map (for POST) or nil
 
-   When STROOPWAFEL_AGENT_SIGN=true, signs the request body with
-   the agent key from .stroopwafel-agent.edn and adds the
-   X-Agent-Signature header."
+   When STROOPWAFEL_AGENT_SIGN=true, signs the full request envelope
+   (method + path + body + UUIDv7 request-id) with the agent key."
   [method path body]
   (let [url     (str (proxy-url) path)
         token   (or (System/getenv "STROOPWAFEL_TOKEN")
@@ -77,7 +76,7 @@
         headers (cond-> {"Accept" "application/edn"}
                   token (assoc "Authorization" (str "Bearer " token))
                   body  (assoc "Content-Type" "application/edn"))
-        headers (sign-and-add-header headers body)
+        headers (sign-and-add-header headers method path body)
         opts    (cond-> {:method method :url url :headers headers :as :text}
                   body (assoc :body (pr-str body)))
         resp    @(http/request opts)]

@@ -82,7 +82,9 @@
                   body-edn     (if body-str (edn/read-string body-str) {})
                   result       (auth/verify-and-authorize
                                 token-str public-key
-                                {:effect effect :domain domain}
+                                {:effect effect :domain domain
+                                 :method (:request-method req)
+                                 :path   uri}
                                 sig-metadata
                                 body-edn)
                   ;; Re-attach body string for downstream handlers
