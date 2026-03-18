@@ -187,10 +187,17 @@
 ;; Token verification and authorization
 ;; ---------------------------------------------------------------------------
 
+(defn- agent-key-fingerprint
+  "Short hex fingerprint of an agent public key (first 16 hex chars)."
+  [key-bytes]
+  (when key-bytes
+    (subs (bytes->hex key-bytes) 0 (min 16 (* 2 (count key-bytes))))))
+
 (defn- check-bearer-only
   "Evaluate a bearer-only token (no requester binding)."
   [token effect domain]
   (let [result (sw/evaluate token
+                            :explain? true
                             :authorizer
                             {:facts [[:requested-effect effect]
                                      [:requested-domain domain]]
@@ -202,7 +209,8 @@
       {:authorized true}
       {:authorized false
        :reason (str "Token does not grant " (name effect)
-                    " access to " domain)})))
+                    " access to " domain)
+       :explain (:explain result)})))
 
 (defn- check-requester-bound
   "Evaluate a requester-bound token with signed request verification.
@@ -249,6 +257,7 @@
 
               ;; 5. Evaluate Datalog authorization
               (let [result (sw/evaluate token
+                                        :explain? true
                                         :authorizer
                                         {:facts [[:requested-effect effect]
                                                  [:requested-domain domain]
@@ -264,9 +273,13 @@
                                          :policies [{:kind :allow
                                                      :query [[:agent-can-act '?k]]}]})]
                 (if (:valid? result)
-                  {:authorized true :requester-bound true :request-id env-req-id}
+                  {:authorized true
+                   :requester-bound true
+                   :request-id env-req-id
+                   :agent-key-fp (agent-key-fingerprint verified-key)}
                   {:authorized false
-                   :reason "Token not bound to this agent key"})))))))))
+                   :reason "Token not bound to this agent key"
+                   :explain (:explain result)})))))))))
 
 (defn verify-and-authorize
   "Verify token signature and evaluate authorization for a request.

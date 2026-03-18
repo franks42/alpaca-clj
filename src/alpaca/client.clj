@@ -110,7 +110,11 @@
                      (cond-> {:headers headers}
                        (seq body) (assoc :headers (assoc headers "Content-Type" "application/json")
                                          :body (json/generate-string body)))))
-         resp    @(http/request (merge opts {:method method :url url}))]
+         ;; Timeouts: 10s connect, 30s for reads, 10s for writes/deletes
+         timeout-ms (if (= method :get) 30000 10000)
+         resp    @(http/request (merge opts {:method method :url url
+                                             :connect-timeout 10000
+                                             :timeout timeout-ms}))]
      (if (<= 200 (:status resp) 299)
        (let [body-str (if (string? (:body resp))
                         (:body resp)

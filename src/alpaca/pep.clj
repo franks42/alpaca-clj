@@ -124,20 +124,26 @@
                               req)]
 
                   (if (:authorized result)
-                    ;; 6a. Allow
+                    ;; 6a. Allow — log agent key fingerprint if requester-bound
                     (do (log/log! {:level :debug :id ::request-authorized
                                    :msg   "Request authorized"
-                                   :data  {:path   (:path canonical)
-                                           :effect (:effect canonical)
-                                           :domain (:domain canonical)
-                                           :bound? (:requester-bound result)}})
+                                   :data  (cond-> {:path   (:path canonical)
+                                                   :effect (:effect canonical)
+                                                   :domain (:domain canonical)}
+                                            (:requester-bound result)
+                                            (assoc :bound? true
+                                                   :agent-key-fp (:agent-key-fp result))
+                                            (:request-id result)
+                                            (assoc :request-id (:request-id result)))})
                         ((or on-allow default-on-allow) handler req canonical result))
 
-                    ;; 6b. Deny
+                    ;; 6b. Deny — log Datalog proof tree for debugging
                     (do (log/log! {:level :warn :id ::request-denied
                                    :msg   "Request denied"
-                                   :data  {:path   (:path canonical)
-                                           :effect (:effect canonical)
-                                           :domain (:domain canonical)
-                                           :reason (:reason result)}})
+                                   :data  (cond-> {:path   (:path canonical)
+                                                   :effect (:effect canonical)
+                                                   :domain (:domain canonical)
+                                                   :reason (:reason result)}
+                                            (:explain result)
+                                            (assoc :explain (:explain result)))})
                         ((or on-deny default-on-deny) canonical result))))))))))))
