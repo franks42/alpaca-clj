@@ -80,9 +80,9 @@
   ([] (make-authorize nil nil))
   ([roster] (make-authorize roster nil))
   ([roster proxy-identity]
-   (fn [token-str public-key canonical sig-metadata body]
+   (fn [token-str trust-roots canonical sig-metadata body]
      (auth/verify-and-authorize
-      token-str public-key
+      token-str trust-roots
       {:effect (:effect canonical)
        :domain (:domain canonical)
        :method (keyword (:method canonical))

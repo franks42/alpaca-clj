@@ -84,9 +84,10 @@
 
    Returns: sealed token string (CEDN) ready for Bearer header."
   [root-kp {:keys [effects domains agent-key]}]
-  (let [effect-facts (mapv (fn [e] [:effect e]) effects)
+  (let [signer-pk    (sw-crypto/encode-public-key (:pub root-kp))
+        effect-facts (mapv (fn [e] [:effect e]) effects)
         domain-facts (mapv (fn [d] [:domain d]) domains)
-        all-facts    (cond-> (into effect-facts domain-facts)
+        all-facts    (cond-> (into [[:signer-key signer-pk]] (concat effect-facts domain-facts))
                        agent-key (conj [:authorized-agent-key agent-key]))
         token        (sw/issue
                       {:facts all-facts}
@@ -109,11 +110,13 @@
 
    Returns: sealed token string (CEDN) ready for Bearer header."
   [root-kp {:keys [rights]}]
-  (let [right-facts (mapv (fn [[group effect domain]]
+  (let [signer-pk   (sw-crypto/encode-public-key (:pub root-kp))
+        right-facts (mapv (fn [[group effect domain]]
                             [:right group effect domain])
                           rights)
+        all-facts   (into [[:signer-key signer-pk]] right-facts)
         token       (sw/issue
-                     {:facts right-facts}
+                     {:facts all-facts}
                      {:private-key (:priv root-kp)})
         sealed      (sw/seal token)]
     (serialize-token sealed)))
@@ -222,22 +225,36 @@
     (subs (bytes->hex key-bytes) 0 (min 16 (* 2 (count key-bytes))))))
 
 (defn- check-bearer-only
-  "Evaluate a bearer-only token (no requester binding)."
-  [token effect domain]
+  "Evaluate a bearer-only token (no requester binding).
+   Checks effect + domain + signer trust via Datalog."
+  [token effect domain trust-root-fcts]
   (let [result (sw/evaluate token
                             :explain? true
                             :authorizer
-                            {:facts [[:requested-effect effect]
-                                     [:requested-domain domain]]
+                            {:facts (into [[:requested-effect effect]
+                                           [:requested-domain domain]]
+                                          trust-root-fcts)
+                             :rules [{:id   :signer-trusted
+                                      :head [:signer-ok '?k]
+                                      :body [[:signer-key '?k]
+                                             [:trusted-root '?k effect domain]]}
+                                     ;; Also allow :any scope (legacy single-root)
+                                     {:id   :signer-trusted-any
+                                      :head [:signer-ok '?k]
+                                      :body [[:signer-key '?k]
+                                             [:trusted-root '?k :any :any]]}]
                              :checks [{:id    :check-effect
                                        :query [[:effect effect]]}
                                       {:id    :check-domain
-                                       :query [[:domain domain]]}]})]
+                                       :query [[:domain domain]]}]
+                             :policies [{:kind :allow
+                                         :query [[:signer-ok '?k]]}]})]
     (if (:valid? result)
       {:authorized true}
       {:authorized false
        :reason (str "Token does not grant " (name effect)
-                    " access to " domain)
+                    " access to " domain
+                    " (or signer not trusted for this scope)")
        :explain (:explain result)})))
 
 (defn- verify-envelope
@@ -365,70 +382,119 @@
                :reason "Token not bound to this agent key"
                :explain (:explain result)}))))))
 
+(defn- extract-signer-key
+  "Extract [:signer-key <pk-bytes>] from the token's authority block facts.
+   Returns the public key bytes, or nil if not present."
+  [token]
+  (some (fn [fact]
+          (when (= :signer-key (first fact))
+            (second fact)))
+        (get-in token [:blocks 0 :facts])))
+
+(defn- trust-root-facts
+  "Convert trust-roots config into Datalog facts.
+
+   Accepts either:
+   - A single PublicKey (legacy, single root — generates unscoped trust fact)
+   - A map of {pk-bytes → {:scoped-to {:effects #{...} :domains #{...}}}}
+
+   Returns vector of [:trusted-root pk-bytes effect domain] facts."
+  [trust-roots]
+  (cond
+    ;; Single public key (legacy) — trust for everything
+    (and (not (map? trust-roots)) (not (nil? trust-roots)))
+    (let [pk-bytes (sw-crypto/encode-public-key trust-roots)]
+      [[:trusted-root pk-bytes :any :any]])
+
+    ;; Map of pk-bytes → scope
+    (map? trust-roots)
+    (into []
+          (mapcat (fn [[pk-bytes {:keys [scoped-to]}]]
+                    (if scoped-to
+                      (for [effect (:effects scoped-to)
+                            domain (:domains scoped-to)]
+                        [:trusted-root pk-bytes effect domain])
+                      ;; No scope = trust for everything
+                      [[:trusted-root pk-bytes :any :any]])))
+          trust-roots)
+
+    :else []))
+
 (defn verify-and-authorize
-  "Verify token signature and evaluate authorization for a request.
+  "Two-step verification and authorization.
+
+   Step 1 (crypto): Extract [:signer-key] from token, verify signature.
+   Step 2 (policy): Add token facts + trust-root facts + request facts
+                    to Datalog, let the join decide.
 
    Arguments:
      token-str    — serialized token string (from Bearer header)
-     public-key   — root public key
+     trust-roots  — PublicKey (single root) or {pk-bytes → {:scoped-to ...}} (multi-root)
      request      — map with :effect, :domain, :method, :path from schema
-     sig-metadata — (optional) deserialized signature metadata from X-Agent-Signature header
-     request-body — (optional) the EDN request body (for envelope verification)
-
-   Options map keys:
-     :roster         — (optional) group roster for SDSI-style authorization
-     :proxy-identity — (optional) proxy identity string for audience verification
+     sig-metadata — (optional) deserialized signature metadata
+     request-body — (optional) the EDN request body
+     opts         — (optional) {:roster ... :proxy-identity ...}
 
    Returns:
-     {:authorized true} or {:authorized false :reason \"...\"}."
-  ([token-str public-key request]
-   (verify-and-authorize token-str public-key request nil nil nil))
-  ([token-str public-key request sig-metadata request-body]
-   (verify-and-authorize token-str public-key request sig-metadata request-body nil))
-  ([token-str public-key {:keys [effect domain method path]} sig-metadata request-body
+     {:authorized true ...} or {:authorized false :reason \"...\"}."
+  ([token-str trust-roots request]
+   (verify-and-authorize token-str trust-roots request nil nil nil))
+  ([token-str trust-roots request sig-metadata request-body]
+   (verify-and-authorize token-str trust-roots request sig-metadata request-body nil))
+  ([token-str trust-roots {:keys [effect domain method path]} sig-metadata request-body
     {:keys [roster proxy-identity] :as _opts}]
    (try
-     (let [token (deserialize-token token-str)
-           facts (get-in token [:blocks 0 :facts])]
-       ;; 1. Verify cryptographic integrity
-       (if-not (sw/verify token {:public-key public-key})
+     (let [token            (deserialize-token token-str)
+           facts            (get-in token [:blocks 0 :facts])
+           ;; === STEP 1: Cryptographic signature verification ===
+           ;; Extract the signer's public key from the token, verify against it.
+           ;; This step knows nothing about trust — only "is the signature valid?"
+           signer-key-bytes (extract-signer-key token)
+           signer-pk        (when signer-key-bytes
+                              (sw-crypto/decode-public-key signer-key-bytes))]
+       (cond
+         (nil? signer-pk)
+         {:authorized false
+          :reason "Token missing [:signer-key] fact — cannot verify signature"}
+
+         (not (sw/verify token {:public-key signer-pk}))
          {:authorized false :reason "Token signature verification failed"}
 
-         ;; 2. Detect token type from facts
+         :else
+           ;; === STEP 2: Policy evaluation via Datalog ===
+           ;; Token facts + trust-root facts + request facts all go into Datalog.
+           ;; The join decides: is the signer trusted for this operation?
          (let [has-agent-key? (some #(= :authorized-agent-key (first %)) facts)
-               has-right?     (some #(= :right (first %)) facts)]
+               has-right?     (some #(= :right (first %)) facts)
+               needs-sig?     (or has-agent-key? has-right?)
+               tr-facts       (trust-root-facts trust-roots)]
            (cond
-             ;; SDSI group token — has [:right ...] facts, needs roster + signature
-             (and has-right? sig-metadata roster)
-             (do (evict-expired-cache-entries!)
-                 (check-sdsi-group token effect domain sig-metadata
-                                   method path request-body roster
-                                   proxy-identity))
-
-             ;; SDSI group token but missing signature
-             (and has-right? (nil? sig-metadata))
+               ;; Signed request required but not provided
+             (and needs-sig? (nil? sig-metadata))
              {:authorized false
-              :reason "Group token requires signed request (X-Agent-Signature header missing)"}
+              :reason (str (if has-right? "Group" "Bound")
+                           " token requires signed request"
+                           " (X-Agent-Signature header missing)")}
 
-             ;; SDSI group token but no roster configured
+               ;; SDSI group token but no roster
              (and has-right? (nil? roster))
              {:authorized false
               :reason "Group token requires roster configuration (STROOPWAFEL_ROSTER)"}
 
-             ;; SPKI requester-bound — has [:authorized-agent-key ...], needs signature
-             (and has-agent-key? (nil? sig-metadata))
-             {:authorized false
-              :reason "Token requires signed request (X-Agent-Signature header missing)"}
-
-             (and has-agent-key? sig-metadata)
+               ;; Signed request flows (SPKI or SDSI)
+             (and needs-sig? sig-metadata)
              (do (evict-expired-cache-entries!)
-                 (check-requester-bound token effect domain sig-metadata
-                                        method path request-body
-                                        proxy-identity))
+                 (if has-right?
+                   (check-sdsi-group token effect domain sig-metadata
+                                     method path request-body roster
+                                     proxy-identity)
+                   (check-requester-bound token effect domain sig-metadata
+                                          method path request-body
+                                          proxy-identity)))
 
-             ;; Bearer-only token
+               ;; Bearer-only token
              :else
-             (check-bearer-only token effect domain)))))
+             (check-bearer-only token effect domain tr-facts)))))
      (catch Exception e
        (log/log! {:level :warn :id ::auth-error
                   :msg "Token verification error"

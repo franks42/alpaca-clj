@@ -78,7 +78,7 @@
         result   (auth/verify-and-authorize token (:pub wrong-kp)
                                             {:effect :read :domain "market"})]
     (is (not (:authorized result)))
-    (is (.contains (:reason result) "signature"))))
+    (is (.contains (:reason result) "not trusted"))))
 
 (deftest bearer-tampered-token-denied
   (let [token-str (issue-bearer #{:read} #{"market"})
@@ -266,6 +266,56 @@
         hex      (auth/bytes->hex original)
         back     (auth/hex->bytes hex)]
     (is (= (seq original) (seq back)))))
+
+;; ---------------------------------------------------------------------------
+;; Multi-root scoped trust
+;; ---------------------------------------------------------------------------
+
+(def authority-b-kp (auth/generate-keypair))
+(def authority-b-pk-bytes (crypto/encode-public-key (:pub authority-b-kp)))
+
+(defn issue-bearer-with [kp effects domains]
+  (auth/issue-token kp {:effects effects :domains domains}))
+
+(defn multi-root-config []
+  {(crypto/encode-public-key (:pub root-kp))
+   {:scoped-to {:effects #{:read} :domains #{"market"}}}
+   authority-b-pk-bytes
+   {:scoped-to {:effects #{:write :destroy} :domains #{"trade"}}}})
+
+(deftest multi-root-authority-a-in-scope
+  (let [token  (issue-bearer-with root-kp #{:read} #{"market"})
+        result (auth/verify-and-authorize
+                token (multi-root-config) {:effect :read :domain "market"})]
+    (is (:authorized result))))
+
+(deftest multi-root-authority-a-out-of-scope
+  (testing "Authority A is only trusted for read on market, not write on trade"
+    (let [token  (issue-bearer-with root-kp #{:write} #{"trade"})
+          result (auth/verify-and-authorize
+                  token (multi-root-config) {:effect :write :domain "trade"})]
+      (is (not (:authorized result)))
+      (is (.contains (:reason result) "not trusted")))))
+
+(deftest multi-root-authority-b-in-scope
+  (let [token  (issue-bearer-with authority-b-kp #{:write} #{"trade"})
+        result (auth/verify-and-authorize
+                token (multi-root-config) {:effect :write :domain "trade"})]
+    (is (:authorized result))))
+
+(deftest multi-root-authority-b-out-of-scope
+  (testing "Authority B is only trusted for write/destroy on trade, not read on market"
+    (let [token  (issue-bearer-with authority-b-kp #{:read} #{"market"})
+          result (auth/verify-and-authorize
+                  token (multi-root-config) {:effect :read :domain "market"})]
+      (is (not (:authorized result))))))
+
+(deftest multi-root-unknown-signer-denied
+  (let [unknown-kp (auth/generate-keypair)
+        token      (issue-bearer-with unknown-kp #{:read} #{"market"})
+        result     (auth/verify-and-authorize
+                    token (multi-root-config) {:effect :read :domain "market"})]
+    (is (not (:authorized result)))))
 
 ;; ---------------------------------------------------------------------------
 ;; SDSI group authorization
