@@ -6,7 +6,7 @@
         com.github.franks42/stroopwafel {:mvn/version "0.9.0"}
         com.github.franks42/uuidv7 {:mvn/version "0.5.0"}}
 
- :paths ["src"]
+ :paths ["src" "test"]
 
  :tasks
  {;; ==========================================================================
