@@ -46,13 +46,12 @@
 (defn hex->bytes
   "Convert hex string to byte array."
   [hex]
-  (byte-array (map #(unchecked-byte (Integer/parseInt (apply str %) 16))
-                   (partition 2 hex))))
+  (sw-crypto/hex->bytes hex))
 
 (defn bytes->hex
   "Convert byte array to hex string."
   [bs]
-  (apply str (map #(format "%02x" (bit-and % 0xff)) bs)))
+  (sw-crypto/bytes->hex bs))
 
 ;; ---------------------------------------------------------------------------
 ;; Token serialization (CEDN with #bytes support)
