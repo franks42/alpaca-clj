@@ -1,13 +1,13 @@
 (ns alpaca.proxy.middleware
   "Ring middleware for the proxy server.
-   Supports three auth modes:
+
+   Auth modes:
    - Simple: PROXY_TOKEN env var (development)
-   - Stroopwafel bearer: capability token (production)
-   - Stroopwafel requester-bound: token + signed request (highest security)"
+   - Stroopwafel: PEP pipeline with configurable canonicalization"
   (:require [alpaca.proxy.log :as log]
             [alpaca.schema :as schema]
-            [alpaca.auth :as auth]
-            [clojure.edn :as edn]))
+            [alpaca.pep :as pep]
+            [alpaca.pep.http-edn :as http-edn]))
 
 (defn wrap-edn-content-type
   "Set Content-Type: application/edn on all responses."
@@ -16,20 +16,6 @@
     (let [resp (handler req)]
       (assoc-in resp [:headers "Content-Type"] "application/edn; charset=utf-8"))))
 
-(defn- extract-bearer-token
-  "Extract Bearer token from Authorization header."
-  [req]
-  (let [auth-header (get-in req [:headers "authorization"] "")]
-    (when (.startsWith auth-header "Bearer ")
-      (subs auth-header 7))))
-
-(defn- read-body-string
-  "Read request body as a string, preserving it for downstream handlers."
-  [req]
-  (when-let [body (:body req)]
-    (let [s (if (string? body) body (slurp body))]
-      (when-not (empty? s) s))))
-
 (defn wrap-simple-auth
   "Simple auth: check Bearer token against PROXY_TOKEN env var.
    If PROXY_TOKEN is not set, auth is disabled (development mode)."
@@ -37,7 +23,9 @@
   (if (nil? proxy-token)
     handler
     (fn [req]
-      (let [token (extract-bearer-token req)]
+      (let [auth-header (get-in req [:headers "authorization"] "")
+            token       (when (.startsWith auth-header "Bearer ")
+                          (subs auth-header 7))]
         (if (= token proxy-token)
           (handler req)
           {:status 401
@@ -45,57 +33,24 @@
                             :message "Invalid or missing Bearer token"})})))))
 
 (defn wrap-stroopwafel-auth
-  "Stroopwafel capability token auth.
-   Verifies token signature and checks effect class + domain grants.
+  "Stroopwafel capability token auth via the PEP pipeline.
 
-   Supports two modes:
-   - Bearer-only: just Authorization header (token is bearer)
-   - Requester-bound: Authorization + X-Agent-Signature headers
-     (token bound to agent key, agent signs each request)
+   Uses the HTTP+EDN canonicalization template:
+   - Canonicalize: Ring request → canonical envelope (method, path, body, effect, domain)
+   - Extract: Bearer token + X-Agent-Signature header
+   - Authorize: verify token + signature + Datalog policy
+   - Exempt: /health and /api bypass auth
 
-   Skips auth for /health and /api endpoints."
+   The canonicalization step is explicit and auditable — it defines the
+   binding between the wire format and the policy evaluation."
   [handler public-key]
-  (fn [req]
-    (let [uri (:uri req)]
-      ;; Skip auth for discovery and health endpoints
-      (if (or (= uri "/health") (= uri "/api"))
-        (handler req)
-        (let [token-str (extract-bearer-token req)
-              op        (get schema/by-route uri)]
-          (cond
-            (nil? token-str)
-            {:status 401
-             :body (pr-str {:error "Unauthorized"
-                            :message "Missing Bearer token"})}
-
-            (nil? op)
-            ;; Let the router handle unknown routes (404)
-            (handler req)
-
-            :else
-            (let [domain       (namespace (:name op))
-                  effect       (:effect op)
-                  sig-header   (get-in req [:headers "x-agent-signature"])
-                  sig-metadata (when sig-header
-                                 (auth/deserialize-sig-metadata sig-header))
-                  body-str     (when sig-metadata (read-body-string req))
-                  body-edn     (if body-str (edn/read-string body-str) {})
-                  result       (auth/verify-and-authorize
-                                token-str public-key
-                                {:effect effect :domain domain
-                                 :method (:request-method req)
-                                 :path   uri}
-                                sig-metadata
-                                body-edn)
-                  ;; Re-attach body string for downstream handlers
-                  req          (if (and body-str (not (string? (:body req))))
-                                 (assoc req :body body-str)
-                                 req)]
-              (if (:authorized result)
-                (handler req)
-                {:status 403
-                 :body (pr-str {:error "Forbidden"
-                                :reason (:reason result)})}))))))))
+  ((pep/create-pep
+    {:canonicalize  http-edn/canonicalize
+     :extract-creds http-edn/extract-creds
+     :authorize     http-edn/authorize
+     :exempt?       http-edn/exempt?
+     :public-key    public-key})
+   handler))
 
 (defn wrap-error-handler
   "Catch exceptions and return EDN error responses."

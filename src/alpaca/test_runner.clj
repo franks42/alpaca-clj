@@ -5,6 +5,7 @@
 (defn -main [& _args]
   (let [test-nses '[alpaca.router-test
                     alpaca.auth-test
+                    alpaca.pep-test
                     alpaca.keys-test
                     alpaca.ssh-test]]
     (doseq [ns test-nses]
