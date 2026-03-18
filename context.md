@@ -3,7 +3,7 @@
 > Current state snapshot for session continuity.
 > Read this + CLAUDE.md + plan.md to get up to speed.
 >
-> Last updated: 2026-03-18, v0.6.0 (tag: v0.6.0, commit: 169de15 + docs)
+> Last updated: 2026-03-18, v0.6.1 (tag: v0.6.1, stroopwafel 0.10.0 migration)
 
 ---
 
@@ -147,19 +147,22 @@ hash, for multi-signature quorum comparison).
 | http-kit | 2.8.1 | HTTP server + client |
 | cheshire | 6.1.0 | JSON (Alpaca REST) |
 | cedn | 1.2.0 | Canonical EDN serialization |
-| stroopwafel | 0.9.0 | Capability tokens |
+| stroopwafel | 0.10.0 | Capability tokens + envelope + ssh + pep |
 | uuidv7 | 0.5.0 | Timestamp + nonce |
 | trove | 1.1.0 | Structured logging |
 | timbre | 6.8.0 | Logging backend |
 
-## Migration TODO (alpaca-clj → stroopwafel repo)
+## Migration Status (alpaca-clj → stroopwafel repo)
 
-- `alpaca.envelope` → `stroopwafel.envelope`
-- `alpaca.ssh` → `stroopwafel.ssh`
-- `alpaca.pep` → `stroopwafel.pep`
-- `alpaca.pep.http-edn` → `stroopwafel.pep.http-edn`
+**Done (stroopwafel 0.10.0):**
+- `alpaca.envelope` → `stroopwafel.envelope` (sign/verify/serialize/deserialize)
+- `alpaca.ssh` → `stroopwafel.ssh` (SSH Ed25519 key import)
+- `alpaca.pep` → `stroopwafel.pep` (PEP pipeline, logging via :log-fn)
+- `bytes->hex` / `hex->bytes` → `stroopwafel.crypto`
+
+**Remaining:**
+- `alpaca.pep.http-edn` — stays in alpaca-clj (depends on alpaca.schema)
 - Replay protection utilities
-- `bytes->hex` / `hex->bytes`
 - `trust-root-facts` helper
 
 ## Key Commands

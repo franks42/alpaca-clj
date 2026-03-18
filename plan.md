@@ -201,16 +201,18 @@ Security properties:
 
 ---
 
-## TODO: Migrate to Stroopwafel
+## Migration to Stroopwafel
 
-The following alpaca-clj functionality should be reviewed for migration to the stroopwafel repo:
+**Done (stroopwafel 0.10.0):**
+- [x] `alpaca.envelope` → `stroopwafel.envelope` — generic sign/verify with quorum support
+- [x] `alpaca.ssh` → `stroopwafel.ssh` — SSH Ed25519 key import
+- [x] `alpaca.pep` → `stroopwafel.pep` — PEP pipeline (logging via pluggable :log-fn)
+- [x] `bytes->hex` / `hex->bytes` → `stroopwafel.crypto`
 
-- [ ] `alpaca.ssh` — SSH Ed25519 key import (standalone, no alpaca deps)
-- [ ] Request envelope signing (method + path + body + UUIDv7 request-id) — currently in `alpaca.auth/sign-request`, could generalize `stroopwafel.request/sign-request` to accept envelope structure
-- [ ] Replay protection (UUIDv7 freshness + nonce cache) — generic middleware, not alpaca-specific
-- [ ] `bytes->hex` / `hex->bytes` utilities — used everywhere, belong in `stroopwafel.crypto`
-- [ ] `alpaca.pep` — PEP pipeline abstraction (create-pep, configurable canonicalize/extract/authorize/exempt)
-- [ ] `alpaca.pep.http-edn` — HTTP+EDN canonicalization template (first of several wire format templates)
+**Remaining:**
+- [ ] Replay protection (UUIDv7 freshness + nonce cache) — generic, not alpaca-specific
+- [ ] `trust-root-facts` helper — Datalog fact generation from trust-root config
+- [ ] `alpaca.pep.http-edn` — stays in alpaca-clj (depends on alpaca.schema)
 
 ---
 
