@@ -184,6 +184,32 @@ bb api market/quote --symbol AAPL    # 403 — "requires signed request"
 #                                      403 — "not bound to this agent key"
 ```
 
+### SDSI Name Binding (Groups)
+
+Stroopwafel 0.9.0 adds SDSI-style name-to-key mappings. Instead of binding a token to one agent, bind entitlements to a *group name* — the authorizer maintains the roster:
+
+```clojure
+;; One token for the "traders" group — no specific keys in the token
+(sw/issue {:facts [[:right "traders" :read "market"]
+                   [:right "traders" :write "trade"]]}
+          {:private-key (:priv root-kp)})
+
+;; Authorizer maintains the group roster
+;; Add/remove members without reissuing tokens
+:authorizer
+{:facts [[:named-key "traders" alice-pk-bytes]
+         [:named-key "traders" bob-pk-bytes]]
+ :rules '[{:id   :resolve-name
+           :head [:authenticated-as ?name]
+           :body [[:named-key ?name ?k]
+                  [:request-verified-agent-key ?k]]}]
+ :policies '[{:kind :allow
+              :query [[:authenticated-as ?name]
+                      [:right ?name ?action ?resource]]}]}
+```
+
+This is the full [SPKI/SDSI](https://datatracker.ietf.org/doc/html/rfc2693) model from 1996 expressed as Datalog: SPKI binds authorization to keys, SDSI binds names to keys, Datalog joins chain them together. Adding or removing group members is an authorizer config change — no token reissuance needed.
+
 ### Auth Modes
 
 The proxy auto-detects auth mode from environment:
@@ -304,7 +330,7 @@ The agent's private key **never leaves the agent's home directory**. The operato
 | [http-kit](https://github.com/http-kit/http-kit) | 2.8.1 | HTTP server + client |
 | [cheshire](https://github.com/dakrone/cheshire) | 6.1.0 | JSON (Alpaca REST API) |
 | [cedn](https://github.com/franks42/canonical-edn) | 1.2.0 | Canonical EDN serialization |
-| [stroopwafel](https://github.com/franks42/stroopwafel) | 0.8.0 | Capability tokens with requester binding |
+| [stroopwafel](https://github.com/franks42/stroopwafel) | 0.9.0 | Capability tokens with requester binding + SDSI groups |
 | [trove](https://github.com/taoensso/trove) | 1.1.0 | Structured logging |
 | [timbre](https://github.com/taoensso/timbre) | 6.8.0 | Logging backend |
 
