@@ -142,37 +142,109 @@ Fact representation:
 - `[fact]` — bare fact, inherits envelope `:expires`
 - `[fact expires-ms]` — fact with per-fact absolute expiry, must be ≤ envelope `:expires`
 
-### Pre-Evaluation Filter
+### Temporal Fact Validity
 
-Before Datalog evaluation, the fact store is filtered by expiry:
+Every fact has a **validity window** — a time range during which the
+assertion is true:
 
-```clojure
-(def now (System/currentTimeMillis))
-
-(def live-facts
-  (filter (fn [[_fact expires]]
-            (or (nil? expires) (< now expires)))
-          all-facts-with-expiry))
+```
+valid-from  ≤  T  <  valid-to    →  fact is live at time T
 ```
 
-Expired facts are **absent**, not denied. They simply don't participate
-in any join. The Datalog engine receives only live facts and evaluates
-normally — no engine changes required.
+- `valid-from` — when the assertion starts being true (default: signing time from UUIDv7)
+- `valid-to` — when the assertion stops being true (default: envelope `:expires`)
+
+```clojure
+;; Fact representations in the message
+[:effect :read]                                 ;; inherits both from envelope
+[[:method "post"] {:valid-to 1742000000030000}] ;; custom expiry, inherits valid-from
+[[:scheduled-action :rebalance]                 ;; explicit window
+ {:valid-from 1742000050000000                  ;; starts in 50 seconds
+  :valid-to   1742000086400000}]                ;; expires in 24 hours
+```
+
+Defaults when not specified:
+- `valid-from` = envelope signing time (extracted from UUIDv7 request-id)
+- `valid-to` = envelope `:expires`
+
+Constraints:
+- Per-fact `valid-to` must be ≤ envelope `:expires` (the ceiling)
+- Per-fact `valid-from` must be ≥ envelope signing time (can't assert before signing)
+
+### Pre-Evaluation Filter
+
+Before Datalog evaluation, the fact store is filtered by the query time:
+
+```clojure
+(defn live-facts-at [all-facts query-time]
+  (filter (fn [{:keys [valid-from valid-to]}]
+            (and (<= valid-from query-time)
+                 (< query-time valid-to)))
+          all-facts))
+```
+
+The default query time is `now`. Expired facts are **absent**, not denied.
+They don't participate in any join. The Datalog engine receives only live
+facts and evaluates normally — no engine changes required.
 
 Evaluation is a **point-in-time snapshot**: capture `now` once, filter once,
 evaluate against the frozen set. The result is valid as of that moment.
-If a fact expires a millisecond after the snapshot, that's the next
-evaluation's concern — this one was correct at its evaluation time.
+
+### Temporal Queries and Diagnostics
+
+The fact store SHOULD retain all facts (including expired ones) rather
+than discarding them. This enables temporal queries — re-evaluating the
+same policy at a different point in time:
+
+```clojure
+;; Standard evaluation: "is this allowed now?"
+(evaluate facts {:as-of (System/currentTimeMillis)})
+;; → {:valid? false}
+
+;; Diagnostic: "would this have been allowed 5 seconds ago?"
+(evaluate facts {:as-of (- (System/currentTimeMillis) 5000)})
+;; → {:valid? true}
+;; → Conclusion: request arrived 5 seconds too late, fact [:method "post"] expired
+
+;; Audit: "was this authorized at the time it was processed?"
+(evaluate facts {:as-of processing-timestamp})
+
+;; Simulation: "if we add this trust root, what past requests would have been allowed?"
+(evaluate (concat facts new-trust-roots) {:as-of historical-timestamp})
+```
+
+The denial diagnostic becomes a temporal scan:
+
+```
+Denied at T=now.
+Evaluated at T=now-1s: allowed.
+Evaluated at T=now-2s: allowed.
+Fact [:method "post"] valid-from=T-35s valid-to=T-5s.
+→ Request arrived 5 seconds after the request assertion expired.
+→ The 30-second request TTL was exceeded.
+```
+
+No special debugging logic — re-run the same query at earlier timestamps.
+Same engine, same facts, different query time. Facts don't disappear;
+they have temporal boundaries.
+
+This is a basic **temporal Datalog** model: each fact has a validity window,
+evaluation is parameterized by time, and the fact store is append-only.
+The simple implementation filters expired facts before evaluation.
+The full implementation retains all facts and supports `:as-of` queries.
 
 ### Expiry Subsumes Several Mechanisms
 
-| Mechanism | How expiry handles it |
+| Mechanism | How temporal validity handles it |
 |---|---|
-| Request freshness | Per-fact expiry on request fields (30s) |
-| Session validity | Per-fact expiry on session facts (hours) |
-| Policy rotation | Per-fact expiry on policy facts (days) |
-| Soft revocation | Don't renew — let it expire naturally |
-| Immediate revocation | Revocation facts in Datalog (separate mechanism, orthogonal) |
+| Request freshness | Short `valid-to` on request facts (30s) |
+| Session validity | Medium `valid-to` on session facts (hours) |
+| Policy rotation | Long `valid-to` on policy facts (days) |
+| Scheduled actions | `valid-from` in the future |
+| Soft revocation | Don't renew — let `valid-to` pass naturally |
+| Immediate revocation | Revocation facts in Datalog (separate, orthogonal) |
+| Audit trail | Retain all facts, query at historical `:as-of` time |
+| Denial diagnostics | Re-evaluate at earlier time to find what expired |
 
 ---
 
