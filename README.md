@@ -249,9 +249,26 @@ operator account          agent-trader account         proxy account
                             token.cedn    (0644)          (root public key)
 ```
 
+### SSH Key Reuse
+
+Agents can use existing `~/.ssh/id_ed25519` keys — no new key ceremony needed:
+
+```clojure
+(require '[alpaca.ssh :as ssh])
+
+;; Load the SSH keypair that already exists
+(def agent-kp (ssh/load-ssh-keypair))  ;; reads ~/.ssh/id_ed25519{,.pub}
+
+;; Use it for request signing — works directly with stroopwafel
+(require '[stroopwafel.request :as req])
+(def signed (req/sign-request {:symbol "AAPL"} (:priv agent-kp) (:pub agent-kp)))
+```
+
+The SSH key infrastructure that sysadmins already manage, audit, and rotate IS the capability binding infrastructure. `alpaca.ssh` converts SSH Ed25519 format to Java key objects — just fixed ASN.1 header prepends, no crypto libraries needed.
+
 **Bootstrap flow:**
 
-1. **Agent** starts → generates Ed25519 keypair → writes public key to `~/.stroopwafel/public-key.hex`
+1. **Agent** uses existing `~/.ssh/id_ed25519.pub` (or generates Ed25519 keypair)
 2. **Operator** reads agent's public key, decides capabilities, mints bound token
 3. **Operator** writes token to agent's `~/.stroopwafel/token.cedn`
 4. **Agent** reads own private key + token → ready to make signed requests

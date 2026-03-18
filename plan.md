@@ -106,6 +106,16 @@ Stroopwafel 0.7.0 runs on bb. Token auth fully integrated.
 - [ ] Paper-to-live promotion ceremony
 - [ ] Adversarial schema review
 
+#### SSH Key Reuse
+
+Agents can use existing `~/.ssh/id_ed25519` keys instead of generating stroopwafel-specific keys. The `alpaca.ssh` namespace converts SSH Ed25519 format to Java key objects:
+- SSH public key → 12-byte X.509 header + 32-byte raw key
+- SSH private key → parse OpenSSH format → extract 32-byte seed → 16-byte PKCS#8 header
+
+No new key ceremony needed. The SSH key management that sysadmins already know, already audit, and already rotate IS the capability binding infrastructure.
+
+`alpaca.ssh` is dependency-free (just `clojure.string`) — intended to move to stroopwafel repo later.
+
 #### Trust Bootstrap Protocol
 
 Four OS accounts, each with isolated credentials:
