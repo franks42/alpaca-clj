@@ -236,6 +236,39 @@ bb server:status             # check if running
 
 ---
 
+## Trust Bootstrap (Production Deployment)
+
+In production, each party runs under a separate OS account. File permissions enforce key isolation.
+
+```
+operator account          agent-trader account         proxy account
+─────────────────         ──────────────────────       ──────────────────
+.stroopwafel-root.edn     ~/.stroopwafel/              ~/.alpaca/
+  (root private key)        agent.edn     (0600)         credentials (0600)
+                            public-key.hex (0644)       STROOPWAFEL_ROOT_KEY
+                            token.cedn    (0644)          (root public key)
+```
+
+**Bootstrap flow:**
+
+1. **Agent** starts → generates Ed25519 keypair → writes public key to `~/.stroopwafel/public-key.hex`
+2. **Operator** reads agent's public key, decides capabilities, mints bound token
+3. **Operator** writes token to agent's `~/.stroopwafel/token.cedn`
+4. **Agent** reads own private key + token → ready to make signed requests
+5. **Proxy** runs separately — has root public key (verifies tokens) + Alpaca credentials (forwards to Alpaca)
+
+The agent's private key **never leaves the agent's home directory**. The operator **never sees the private key** — only reads the public key and writes back a sealed token.
+
+**Compromise analysis:**
+
+| Compromised party | Attacker gets | Cannot do |
+|---|---|---|
+| Agent | Bound token (useless without private key) | Mint new tokens, access Alpaca directly |
+| Proxy | Alpaca API keys | Mint tokens (no root private key) |
+| Operator | Root private key (can mint tokens) | Use tokens without agent keys; detected via audit |
+
+---
+
 ## Key Design Decisions
 
 - **Schema as single source of truth** — one Clojure data structure defines all operations. Router, CLI, Datalog predicates, and API discovery are all derived from it. Adding an endpoint means adding one schema entry.

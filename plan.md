@@ -97,12 +97,60 @@ Stroopwafel 0.7.0 runs on bb. Token auth fully integrated.
 - [ ] Account configuration
 
 ### Phase 5 — Production Hardening
+- [ ] **Trust bootstrap via OS accounts** (see below)
 - [ ] Audit log (append-only, cryptographic chaining)
 - [ ] Linear capabilities (single-use tokens via revocation IDs)
 - [ ] Temporal constraints (market hours window, token expiry)
 - [ ] Injected account state (daily P&L, buying power checks in Datalog)
+- [ ] Per-symbol restrictions in token facts (allowed symbol universe)
 - [ ] Paper-to-live promotion ceremony
 - [ ] Adversarial schema review
+
+#### Trust Bootstrap Protocol
+
+Four OS accounts, each with isolated credentials:
+
+```
+operator          — human, holds root private key, mints tokens
+proxy             — runs alpaca-clj proxy, holds Alpaca API keys + root public key
+agent-trader      — AI agent account, holds own Ed25519 keypair + capability token
+agent-reader      — AI agent account (read-only), holds own keypair + restricted token
+```
+
+Bootstrap flow:
+
+```
+1. Agent account starts → generates Ed25519 keypair
+   ~/.stroopwafel/agent.edn        (private key, mode 0600, agent-only)
+   ~/.stroopwafel/public-key.hex   (public key, mode 0644, world-readable)
+
+2. Operator reads agent's public key
+   cat /home/agent-trader/.stroopwafel/public-key.hex
+
+3. Operator mints bound token with specific capabilities
+   bb token issue --effects read,write --domains market,trade \
+     --agent-key $(cat /home/agent-trader/.stroopwafel/public-key.hex)
+
+4. Operator writes token to agent's well-known path
+   → /home/agent-trader/.stroopwafel/token.cedn  (mode 0644)
+
+5. Agent reads own private key + token → ready to make signed requests
+   Private key NEVER leaves agent's home directory.
+   Operator NEVER sees private key — only reads public key.
+
+6. Proxy runs in its own account
+   ~/.alpaca/credentials           (Alpaca API key+secret, mode 0600)
+   STROOPWAFEL_ROOT_KEY env var    (root public key — verifies tokens)
+```
+
+Security properties:
+- Agent's private key: only agent can read (OS enforced, mode 0600)
+- Public key: world-readable (it's public — that's the point)
+- Token: authority writes → agent reads (authority has write access via group or sudo)
+- Alpaca credentials: only proxy account can read
+- Compromised agent → attacker gets bound token (useless without private key)
+- Compromised proxy → attacker gets Alpaca keys but not root private key (can't mint tokens)
+- Compromised operator → worst case, can mint new tokens (monitored via audit log)
 
 ---
 
@@ -142,4 +190,4 @@ Stroopwafel 0.7.0 runs on bb. Token auth fully integrated.
 
 ---
 
-*Status: Phase 0+1+2+3 complete (v0.3.0). Phase 4 (extended coverage) next.*
+*Status: Phase 0+1+2+3 complete (v0.3.1). Requester-bound tokens integrated. Phase 4 (extended coverage) or Phase 5 (production hardening) next.*
