@@ -3,7 +3,7 @@
 > Capability-gated proxy trading server for Alpaca Markets.
 > Babashka runtime. EDN end-to-end. fn-as-URL routing. Stroopwafel authorization.
 >
-> Last updated: 2026-03-18
+> Last updated: 2026-03-19
 
 ---
 
@@ -217,6 +217,13 @@ Security properties:
 - [x] Keypair hex convenience → `stroopwafel.crypto` (`export/import-public-key-hex`)
 - [x] `trust-root-facts` → `stroopwafel.trust` — Datalog fact generation
 
+**Signed-envelope refactor (stroopwafel 0.11.0+):**
+- Blocks in tokens are now signed envelopes with `:type :stroopwafel/signed-envelope`
+- `sw/issue` requires both `:private-key` and `:public-key`
+- Block facts accessed via `(get-in block [:envelope :message :facts])` instead of `(:facts block)`
+- Every signed artifact is self-describing via `:type`
+- `:expires` is optional in envelopes — validity belongs in Datalog facts
+
 **Stays in alpaca-clj (alpaca-specific):**
 - [ ] `alpaca.pep.http-edn` — depends on alpaca.schema
 
@@ -245,4 +252,4 @@ Security properties:
 
 ---
 
-*Status: Phase 0+1+2+3+3b+4b complete (v0.7.0). Dual PEP with client-side enforcement. Phase 4 or 5 next.*
+*Status: Phase 0+1+2+3+3b+4b complete (v0.7.0). Dual PEP with client-side enforcement. Stroopwafel signed-envelope refactor tracked. Phase 4 or 5 next.*

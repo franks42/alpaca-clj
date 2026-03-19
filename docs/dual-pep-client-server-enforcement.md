@@ -206,7 +206,8 @@ different facts:
            [:data-restriction :no-pii-in-params]
            [:data-restriction :no-strategy-in-comments]
            [:data-restriction :no-client-names]]}
-  {:private-key (:priv company-a-authority)})
+  {:private-key (:priv company-a-authority)
+   :public-key  (:pub company-a-authority)})
 ```
 
 The agent's PEP evaluates before signing any request:
