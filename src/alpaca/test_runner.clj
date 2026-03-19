@@ -8,7 +8,9 @@
                     alpaca.pep-test
                     alpaca.keys-test
                     alpaca.ssh-test
-                    alpaca.envelope-test]]
+                    alpaca.envelope-test
+                    alpaca.client-pep-test
+                    alpaca.dual-pep-test]]
     (doseq [ns test-nses]
       (require ns))
     (let [results (apply t/run-tests test-nses)]

@@ -399,6 +399,56 @@ the requester, never the enforcer. On both sides of the request.
 
 ---
 
+## Transport Independence: Messages, Not Sessions
+
+The entire security model is message-based, not session-based. Every
+security-relevant property is carried in the messages themselves:
+
+- **Token**: self-contained signed block chain — carries its own authority proof
+- **Envelope**: signed method + path + body + audience + request-id — carries
+  its own integrity, intent, and freshness
+- **Replay guard**: UUIDv7 nonce in the envelope — stateless verification
+  (only the seen-nonce cache is server-side, and it's ephemeral)
+
+The transport is a dumb pipe. HTTP, HTTPS, message queues, pigeons —
+doesn't matter. The verifier has everything it needs in the message to
+decide: is this authentic, is it fresh, is it authorized, was it intended
+for me?
+
+This is the SPKI/SDSI philosophy: capabilities travel with the request,
+not stored in a server-side session table. There are no cookies, no
+session tokens, no "logged in" state. Each request is independently
+verifiable.
+
+### HTTPS as defense in depth
+
+HTTPS adds destination authentication *before* the message is sent —
+the TLS handshake proves the server's identity via the PKI certificate
+chain. This is valuable but not load-bearing:
+
+```
+Without HTTPS (HTTP, pigeons, QR codes):
+  Signed audience field proves: "this request was intended for proxy-b"
+  Risk: MITM could intercept and read the request (confidentiality)
+  But: cannot forge, replay, or redirect it (integrity + freshness)
+
+With HTTPS:
+  TLS cert proves: "you are actually talking to proxy-b"
+  Signed audience proves: "this request was intended for proxy-b"
+  Both layers reinforce: destination authentication + request integrity
+```
+
+The signed audience field is the wall. HTTPS is the moat. You want both,
+but the wall stands on its own — which is why the same security model
+works over any transport, including ones without encryption.
+
+This transport independence also means the authorization logic is fully
+testable without network calls. Every integration test in the dual-PEP
+suite is pure function calls — no server, no sockets, no TLS. The
+messages carry their own proof.
+
+---
+
 *This is the symmetric completion of the trust model. The server-side PEP
 protects resources. The client-side PEP protects the agent's interests.
 Together they form a complete trust boundary around every request.*

@@ -112,12 +112,16 @@ Generic signed envelope extracted from auth. Multi-signature quorum designed.
 - [ ] Options: contracts, quotes, multi-leg orders
 - [ ] Account configuration
 
-### Phase 4b — Dual PEP / Client-Side Enforcement Demo
-- [ ] Add `audience` field to signed request envelope (proxy verifies it matches its identity)
-- [ ] Client-side PEP library: `alpaca.client-pep/check-outbound` — verify outbound policy before signing
-- [ ] Outbound capability token: approved destinations, data restrictions, operation routing
-- [ ] Cross-company demo: two proxies, two authorities, two independent policy chains
-- [ ] See `docs/dual-pep-client-server-enforcement.md`
+### Phase 4b — Dual PEP / Client-Side Enforcement Demo **[DONE — v0.7.0]**
+- [x] `audience` field in signed request envelope (already wired in Phase 3b)
+- [x] Client-side PEP library: `alpaca.client-pep` — `check-outbound`, `issue-outbound-token`
+- [x] Outbound capability token: approved destinations, effect/domain permissions, data restrictions
+- [x] Data restriction scanning: `:no-pii-in-params`, `:no-client-names`, `:no-strategy-in-comments`
+- [x] CLI: `bb token generate-outbound-keys` + `bb token issue-outbound`
+- [x] Dual-PEP integration tests: 7 scenarios, independent authorities, audience binding
+- [x] 110 tests, 259 assertions, 0 failures
+- [x] clj-kondo 0 errors 0 warnings
+- [x] See `docs/dual-pep-client-server-enforcement.md`
 
 ### Phase 5 — Production Hardening
 - [ ] **Trust bootstrap via OS accounts** (see below)
@@ -209,10 +213,12 @@ Security properties:
 - [x] `alpaca.pep` → `stroopwafel.pep` — PEP pipeline (logging via pluggable :log-fn)
 - [x] `bytes->hex` / `hex->bytes` → `stroopwafel.crypto`
 
-**Remaining:**
-- [ ] Replay protection (UUIDv7 freshness + nonce cache) — generic, not alpaca-specific
-- [ ] `trust-root-facts` helper — Datalog fact generation from trust-root config
-- [ ] `alpaca.pep.http-edn` — stays in alpaca-clj (depends on alpaca.schema)
+- [x] Replay protection → `stroopwafel.replay` — factory-pattern guard
+- [x] Keypair hex convenience → `stroopwafel.crypto` (`export/import-public-key-hex`)
+- [x] `trust-root-facts` → `stroopwafel.trust` — Datalog fact generation
+
+**Stays in alpaca-clj (alpaca-specific):**
+- [ ] `alpaca.pep.http-edn` — depends on alpaca.schema
 
 ---
 
@@ -239,4 +245,4 @@ Security properties:
 
 ---
 
-*Status: Phase 0+1+2+3+3b complete (v0.6.0). Generic envelope with quorum support. Phase 4 or 5 next.*
+*Status: Phase 0+1+2+3+3b+4b complete (v0.7.0). Dual PEP with client-side enforcement. Phase 4 or 5 next.*

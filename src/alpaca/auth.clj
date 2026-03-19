@@ -9,8 +9,9 @@
    request-id that serves as both timestamp and nonce for replay protection."
   (:require [stroopwafel.core :as sw]
             [stroopwafel.crypto :as sw-crypto]
+            [stroopwafel.replay :as replay]
+            [stroopwafel.trust :as trust]
             [alpaca.envelope :as envelope]
-            [com.github.franks42.uuidv7.core :as uuidv7]
             [cedn.core :as cedn] ;; cedn/readers used at runtime
             [clojure.edn :as edn]
             [taoensso.trove :as log]))
@@ -28,8 +29,7 @@
 (defn export-public-key
   "Export public key as hex string for configuration/display."
   [kp]
-  (let [bytes (sw-crypto/encode-public-key (:pub kp))]
-    (apply str (map #(format "%02x" (bit-and % 0xff)) bytes))))
+  (sw-crypto/export-public-key-hex (:pub kp)))
 
 (defn public-key-bytes
   "Get the encoded public key bytes for embedding in token facts."
@@ -39,9 +39,7 @@
 (defn import-public-key
   "Import public key from hex string."
   [hex]
-  (let [bytes (byte-array (map #(unchecked-byte (Integer/parseInt (apply str %) 16))
-                               (partition 2 hex)))]
-    (sw-crypto/decode-public-key bytes)))
+  (sw-crypto/import-public-key-hex hex))
 
 (defn hex->bytes
   "Convert hex string to byte array."
@@ -164,57 +162,12 @@
   (envelope/deserialize s))
 
 ;; ---------------------------------------------------------------------------
-;; Replay protection
+;; Replay protection (delegated to stroopwafel.replay)
 ;; ---------------------------------------------------------------------------
 
-(def ^:private replay-cache
-  "Cache of recently seen request-ids. Keyed by request-id string.
-   Entries expire after the freshness window."
-  (atom {}))
-
-(def ^:private freshness-window-ms
-  "Maximum age of a signed request before it's rejected (2 minutes)."
-  120000)
-
-(defn- check-freshness
-  "Check that the request-id's embedded timestamp is within the freshness window.
-   Returns nil if OK, or error string if stale."
-  [request-id-str]
-  (try
-    (let [request-id (parse-uuid request-id-str)]
-      (if-not (uuidv7/uuidv7? request-id)
-        "request-id is not a valid UUIDv7"
-        (let [ts  (uuidv7/extract-ts request-id)
-              now (System/currentTimeMillis)
-              age (- now ts)]
-          (cond
-            (> age freshness-window-ms)
-            (str "Request too old: " age "ms (max " freshness-window-ms "ms)")
-
-            (< age -5000)
-            (str "Request timestamp is in the future: " (- age) "ms")
-
-            :else nil))))
-    (catch Exception e
-      (str "Invalid request-id: " (.getMessage e)))))
-
-(defn- check-replay
-  "Check that the request-id has not been seen before.
-   Returns nil if OK, or error string if replay detected."
-  [request-id-str]
-  (if (contains? @replay-cache request-id-str)
-    "Replay detected: request-id already seen"
-    (do
-      (swap! replay-cache assoc request-id-str (System/currentTimeMillis))
-      nil)))
-
-(defn- evict-expired-cache-entries!
-  "Remove replay cache entries older than the freshness window."
-  []
-  (let [cutoff (- (System/currentTimeMillis) freshness-window-ms)]
-    (swap! replay-cache
-           (fn [cache]
-             (into {} (filter (fn [[_ ts]] (> ts cutoff)) cache))))))
+(def ^:private replay-guard
+  "Module-level replay guard with default 2-minute freshness window."
+  (replay/create-replay-guard))
 
 ;; ---------------------------------------------------------------------------
 ;; Token verification and authorization
@@ -293,11 +246,9 @@
                     "' but this proxy is '" proxy-identity "'")}
 
       :else
-      (if-let [err (check-freshness request-id)]
+      (if-let [err (replay/check replay-guard request-id)]
         {:authorized false :reason err}
-        (if-let [err (check-replay request-id)]
-          {:authorized false :reason err}
-          nil)))))
+        nil))))
 
 (defn- roster-facts
   "Convert a roster map into [:named-key group pk-bytes] Datalog facts.
@@ -399,32 +350,9 @@
 
 (defn- trust-root-facts
   "Convert trust-roots config into Datalog facts.
-
-   Accepts either:
-   - A single PublicKey (legacy, single root — generates unscoped trust fact)
-   - A map of {pk-bytes → {:scoped-to {:effects #{...} :domains #{...}}}}
-
-   Returns vector of [:trusted-root pk-bytes effect domain] facts."
+   Delegated to stroopwafel.trust/trust-root-facts."
   [trust-roots]
-  (cond
-    ;; Single public key (legacy) — trust for everything
-    (and (not (map? trust-roots)) (not (nil? trust-roots)))
-    (let [pk-bytes (sw-crypto/encode-public-key trust-roots)]
-      [[:trusted-root pk-bytes :any :any]])
-
-    ;; Map of pk-bytes → scope
-    (map? trust-roots)
-    (into []
-          (mapcat (fn [[pk-bytes {:keys [scoped-to]}]]
-                    (if scoped-to
-                      (for [effect (:effects scoped-to)
-                            domain (:domains scoped-to)]
-                        [:trusted-root pk-bytes effect domain])
-                      ;; No scope = trust for everything
-                      [[:trusted-root pk-bytes :any :any]])))
-          trust-roots)
-
-    :else []))
+  (trust/trust-root-facts trust-roots))
 
 (defn verify-and-authorize
   "Two-step verification and authorization.
@@ -489,7 +417,7 @@
 
                ;; Signed request flows (SPKI or SDSI)
              (and needs-sig? sig-metadata)
-             (do (evict-expired-cache-entries!)
+             (do (replay/evict-expired! replay-guard)
                  (if has-right?
                    (check-sdsi-group token effect domain sig-metadata
                                      method path request-body roster

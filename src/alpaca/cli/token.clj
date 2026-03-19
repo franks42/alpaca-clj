@@ -4,11 +4,14 @@
    Usage:
      bb token generate-keys                — generate root keypair
      bb token generate-agent-keys          — generate agent keypair
+     bb token generate-outbound-keys       — generate outbound authority keypair
      bb token issue-read-only              — issue bearer read-only token
      bb token issue --effects read,write --domains market,trading
      bb token issue --effects read --domains market --agent-key <hex>
+     bb token issue-outbound --destinations host:port --effects read --domains market
      bb token inspect <token-string>       — show token contents"
   (:require [alpaca.auth :as auth]
+            [alpaca.client-pep :as cpep]
             [alpaca.telemetry :as telemetry]
             [alpaca.cli.common :as cli]
             [cedn.core :as cedn] ;; cedn/readers used at runtime
@@ -56,6 +59,7 @@
           (System/exit 1)))))
 
 (defn- load-root-keypair [] (load-keypair-file ".stroopwafel-root.edn"))
+(defn- load-outbound-keypair [] (load-keypair-file ".stroopwafel-outbound.edn"))
 
 (defn- cmd-issue [{:keys [effects domains agent-key]}]
   (let [kp    (load-root-keypair)
@@ -69,6 +73,32 @@
   (let [kp     (load-root-keypair)
         rights (for [e effects d domains] [group e d])
         token  (auth/issue-group-token kp {:rights (vec rights)})]
+    (println token)))
+
+(defn- cmd-generate-outbound-keys []
+  (let [kp  (auth/generate-keypair)
+        hex (auth/export-public-key kp)]
+    (println "# Outbound authority keypair for client-side PEP")
+    (println "# The agent uses this public key to verify outbound policy tokens")
+    (println (str "# Outbound authority public key: " hex))
+    (println)
+    (println "# Add to agent's environment:")
+    (println (str "export STROOPWAFEL_OUTBOUND_KEY=\"" hex "\""))
+    (println)
+    (spit ".stroopwafel-outbound.edn"
+          (cedn/canonical-str {:priv (-> kp :priv .getEncoded)
+                               :pub  (-> kp :pub .getEncoded)}))
+    (println "Written to .stroopwafel-outbound.edn")))
+
+(defn- cmd-issue-outbound [{:keys [destinations effects domains restrictions]}]
+  (let [kp          (load-outbound-keypair)
+        permissions (for [d destinations e effects dom domains]
+                      {:destination d :effect e :domain dom})
+        token       (cpep/issue-outbound-token
+                     kp
+                     {:destinations (vec destinations)
+                      :permissions  (vec permissions)
+                      :restrictions (or restrictions #{})})]
     (println token)))
 
 (defn- cmd-inspect [token-str]
@@ -128,6 +158,28 @@
                       #{"market" "account" "trade"})]
         (cmd-issue-group {:group group :effects effects :domains domains}))
 
+      "generate-outbound-keys"
+      (cmd-generate-outbound-keys)
+
+      "issue-outbound"
+      (let [destinations (if (:destinations flags)
+                           (set (str/split (:destinations flags) #","))
+                           (do (println "Error: --destinations required")
+                               (System/exit 1)))
+            effects      (if (:effects flags)
+                           (set (map keyword (str/split (:effects flags) #",")))
+                           #{:read})
+            domains      (if (:domains flags)
+                           (set (str/split (:domains flags) #","))
+                           #{"market"})
+            restrictions (if (:restrictions flags)
+                           (set (map keyword (str/split (:restrictions flags) #",")))
+                           #{})]
+        (cmd-issue-outbound {:destinations destinations
+                             :effects effects
+                             :domains domains
+                             :restrictions restrictions}))
+
       "inspect"
       (if-let [token-str (first rest-args)]
         (cmd-inspect token-str)
@@ -135,9 +187,19 @@
 
       (do (println "Usage: bb token <command>")
           (println "")
-          (println "  generate-keys        Generate root keypair")
-          (println "  generate-agent-keys  Generate agent keypair")
-          (println "  issue-read-only      Issue bearer read-only token (all domains)")
-          (println "  issue                Issue token with --effects, --domains, --agent-key")
-          (println "  issue-group          Issue SDSI group token --group <name> --effects --domains")
-          (println "  inspect              Show token contents")))))
+          (println "  Inbound (server-side) tokens:")
+          (println "  generate-keys          Generate root keypair")
+          (println "  generate-agent-keys    Generate agent keypair")
+          (println "  issue-read-only        Issue bearer read-only token (all domains)")
+          (println "  issue                  Issue token with --effects, --domains, --agent-key")
+          (println "  issue-group            Issue SDSI group token --group --effects --domains")
+          (println "")
+          (println "  Outbound (client-side) tokens:")
+          (println "  generate-outbound-keys Generate outbound authority keypair")
+          (println "  issue-outbound         Issue outbound policy token:")
+          (println "                         --destinations host:port[,host:port,...]")
+          (println "                         --effects read[,write,destroy]")
+          (println "                         --domains market[,trade,account]")
+          (println "                         --restrictions no-pii-in-params[,no-client-names,...]")
+          (println "")
+          (println "  inspect                Show token contents")))))
