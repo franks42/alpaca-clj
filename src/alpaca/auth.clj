@@ -1,12 +1,13 @@
 (ns alpaca.auth
   "Stroopwafel token authentication for the proxy.
 
-   Two auth modes:
-   - Bearer-only: token in Authorization header
-   - Requester-bound: token + signed request envelope
+   Three auth modes:
+   - Bearer-only: token in Authorization header (effect + domain + trust root)
+   - Requester-bound SPKI: token + signed envelope + agent key binding
+   - Requester-bound SDSI: token + signed envelope + roster group membership
 
-   Signed request envelopes include method, path, body, and a UUIDv7
-   request-id that serves as both timestamp and nonce for replay protection."
+   Delegates to stroopwafel for replay protection, trust-root facts,
+   cryptographic primitives, and envelope signing/verification."
   (:require [stroopwafel.core :as sw]
             [stroopwafel.crypto :as sw-crypto]
             [stroopwafel.replay :as replay]
@@ -348,12 +349,6 @@
             (second fact)))
         (get-in token [:blocks 0 :facts])))
 
-(defn- trust-root-facts
-  "Convert trust-roots config into Datalog facts.
-   Delegated to stroopwafel.trust/trust-root-facts."
-  [trust-roots]
-  (trust/trust-root-facts trust-roots))
-
 (defn verify-and-authorize
   "Two-step verification and authorization.
 
@@ -401,7 +396,7 @@
          (let [has-agent-key? (some #(= :authorized-agent-key (first %)) facts)
                has-right?     (some #(= :right (first %)) facts)
                needs-sig?     (or has-agent-key? has-right?)
-               tr-facts       (trust-root-facts trust-roots)]
+               tr-facts       (trust/trust-root-facts trust-roots)]
            (cond
                ;; Signed request required but not provided
              (and needs-sig? (nil? sig-metadata))

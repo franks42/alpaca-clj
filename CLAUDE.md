@@ -22,6 +22,18 @@ alpaca-clj/
 │   ├── config.clj              # API keys from env, base URLs, paper/live
 │   ├── client.clj              # HTTP client for Alpaca REST (JSON internally)
 │   ├── schema.clj              # Predicate schema (single source of truth)
+│   ├── auth.clj                # Stroopwafel token auth (bearer, SPKI, SDSI)
+│   ├── envelope.clj            # Signed envelope delegation to stroopwafel
+│   ├── ssh.clj                 # SSH key import delegation to stroopwafel
+│   ├── keys.clj                # Key file I/O
+│   ├── client_pep.clj          # Client-side PEP (outbound policy enforcement)
+│   ├── telemetry.clj           # Structured logging (trove/timbre)
+│   ├── pep/
+│   │   └── http_edn.clj        # Server-side PEP for HTTP+EDN wire format
+│   ├── cli/
+│   │   ├── api.clj             # Unified CLI: bb api <operation>
+│   │   ├── token.clj           # Token management CLI
+│   │   └── common.clj          # Shared CLI utilities
 │   └── proxy/
 │       ├── server.clj          # http-kit server lifecycle
 │       ├── router.clj          # fn-as-URL routing (structural whitelist)
@@ -48,6 +60,16 @@ bb market clock                 # GET /market/clock
 bb market quote --symbol AAPL   # POST /market/quote
 bb market bars --symbol AAPL    # POST /market/bars
 bb trading positions            # GET /trading/positions
+
+# Token management
+bb token generate-keys          # Generate root keypair
+bb token generate-agent-keys    # Generate agent keypair
+bb token generate-outbound-keys # Generate outbound authority keypair
+bb token issue-read-only        # Issue bearer read-only token
+bb token issue --effects read,write --domains market,trade
+bb token issue --effects read --domains market --agent-key <hex>
+bb token issue-outbound --destinations host:port --effects read --domains market
+bb token inspect <token-string> # Show token contents
 
 # Quality checks
 bb lint                         # clj-kondo (zero errors AND zero warnings)
@@ -165,7 +187,10 @@ export PROXY_TOKEN="shared-secret"    # Phase 1 simple auth
 | `org.httpkit/http-kit` | HTTP server + client | Maven |
 | `cheshire/cheshire` | JSON parsing (Alpaca REST) | Maven |
 | `com.github.franks42/cedn` | Canonical EDN | `../canonical-edn` or Maven |
-| `stroopwafel` | Capability token auth | `../stroopwafel` (local) |
+| `com.github.franks42/stroopwafel` | Capability token auth | `../stroopwafel` (local) |
+| `com.github.franks42/uuidv7` | UUIDv7 (replay protection, request-ids) | Maven |
+| `com.taoensso/trove` | Structured logging | Maven |
+| `com.taoensso/timbre` | Logging backend | Maven |
 
 ---
 
@@ -226,4 +251,4 @@ mcp__memory__memory_store
 
 ---
 
-*Last Updated: 2026-03-17*
+*Last Updated: 2026-03-18*
