@@ -26,7 +26,7 @@
       (is (= {:action :test} (:message inner)))
       (is (some? (:signer-key inner)))
       (is (string? (:request-id inner)))
-      (is (number? (:expires inner))))))
+      (is (nil? (:expires inner)) "3-arity sign no longer adds :expires"))))
 
 (deftest verify-valid-envelope
   (let [outer  (envelope/sign {:action :test} (:priv kp) (:pub kp))
@@ -36,7 +36,7 @@
     (is (some? (:signer-key result)))
     (is (string? (:request-id result)))
     (is (number? (:timestamp result)))
-    (is (number? (:expires result)))
+    (is (nil? (:expires result)) "3-arity sign no longer adds :expires")
     (is (false? (:expired? result)))
     (is (number? (:age-ms result)))
     (is (< (:age-ms result) 5000))))

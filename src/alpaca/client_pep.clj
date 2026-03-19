@@ -140,7 +140,7 @@
         all-facts   (into [[:signer-key signer-pk]]
                           (concat dest-facts perm-facts restr-facts))
         token       (sw/issue {:facts all-facts}
-                              {:private-key (:priv authority-kp)})
+                              {:private-key (:priv authority-kp) :public-key (:pub authority-kp)})
         sealed      (sw/seal token)]
     (auth/serialize-token sealed)))
 
@@ -166,7 +166,7 @@
   [outbound-token-str authority-pub {:keys [destination effect domain body]}]
   (try
     (let [token            (auth/deserialize-token outbound-token-str)
-          facts            (get-in token [:blocks 0 :facts])
+          facts            (get-in token [:blocks 0 :envelope :message :facts])
           signer-key-bytes (some (fn [f] (when (= :signer-key (first f)) (second f))) facts)
           signer-pk        (when signer-key-bytes
                              (sw-crypto/decode-public-key signer-key-bytes))]

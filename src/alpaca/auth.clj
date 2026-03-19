@@ -89,7 +89,7 @@
                        agent-key (conj [:authorized-agent-key agent-key]))
         token        (sw/issue
                       {:facts all-facts}
-                      {:private-key (:priv root-kp)})
+                      {:private-key (:priv root-kp) :public-key (:pub root-kp)})
         sealed       (sw/seal token)]
     (serialize-token sealed)))
 
@@ -115,7 +115,7 @@
         all-facts   (into [[:signer-key signer-pk]] right-facts)
         token       (sw/issue
                      {:facts all-facts}
-                     {:private-key (:priv root-kp)})
+                     {:private-key (:priv root-kp) :public-key (:pub root-kp)})
         sealed      (sw/seal token)]
     (serialize-token sealed)))
 
@@ -340,6 +340,11 @@
                  :reason "Token not bound to this agent key"
                  :explain (:explain result)})))))))
 
+(defn- block-facts
+  "Extract facts from a block (signed-envelope format)."
+  [block]
+  (get-in block [:envelope :message :facts]))
+
 (defn- extract-signer-key
   "Extract [:signer-key <pk-bytes>] from the token's authority block facts.
    Returns the public key bytes, or nil if not present."
@@ -347,7 +352,7 @@
   (some (fn [fact]
           (when (= :signer-key (first fact))
             (second fact)))
-        (get-in token [:blocks 0 :facts])))
+        (block-facts (first (:blocks token)))))
 
 (defn verify-and-authorize
   "Two-step verification and authorization.
@@ -374,7 +379,7 @@
     {:keys [roster proxy-identity] :as _opts}]
    (try
      (let [token            (deserialize-token token-str)
-           facts            (get-in token [:blocks 0 :facts])
+           facts            (block-facts (first (:blocks token)))
            ;; === STEP 1: Cryptographic signature verification ===
            ;; Extract the signer's public key from the token, verify against it.
            ;; This step knows nothing about trust — only "is the signature valid?"

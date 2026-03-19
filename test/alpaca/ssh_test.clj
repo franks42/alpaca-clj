@@ -56,7 +56,7 @@
                    {:facts [[:authorized-agent-key agent-pk]
                             [:effect :read]
                             [:domain "market"]]}
-                   {:private-key (:priv root-kp)})
+                   {:private-key (:priv root-kp) :public-key (:pub root-kp)})
         outer     (envelope/sign {:action :test} (:priv ssh-kp) (:pub ssh-kp) 60)
         verified  (envelope/verify outer)
         result    (sw/evaluate token

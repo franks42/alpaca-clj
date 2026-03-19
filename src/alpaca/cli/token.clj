@@ -107,15 +107,18 @@
       (println "Blocks:" (count (:blocks token)))
       (println "Sealed:" (= :sealed (get-in token [:proof :type])))
       (doseq [[i block] (map-indexed vector (:blocks token))]
-        (println (str "\nBlock " i ":"))
-        (println "  Facts:" (pr-str (:facts block)))
-        (when (seq (:rules block))
-          (println "  Rules:" (pr-str (:rules block))))
-        (when (seq (:checks block))
-          (println "  Checks:" (pr-str (:checks block)))))
+        (let [content (get-in block [:envelope :message])]
+          (println (str "\nBlock " i ":"))
+          (println "  Type:" (:type block))
+          (println "  Signer:" (auth/bytes->hex (get-in block [:envelope :signer-key])))
+          (println "  Facts:" (pr-str (:facts content)))
+          (when (seq (:rules content))
+            (println "  Rules:" (pr-str (:rules content))))
+          (when (seq (:checks content))
+            (println "  Checks:" (pr-str (:checks content))))))
       ;; Check for agent binding
       (let [agent-fact (some #(when (= :authorized-agent-key (first %)) %)
-                             (get-in token [:blocks 0 :facts]))]
+                             (get-in token [:blocks 0 :envelope :message :facts]))]
         (when agent-fact
           (println "\nRequester-bound: yes")
           (println "  Agent key:" (auth/bytes->hex (second agent-fact))))))
