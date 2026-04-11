@@ -7,7 +7,6 @@
             [alpaca.telemetry :as telemetry]
             [alpaca.config :as config]
             [alpaca.schema :as schema]
-            [alpaca.auth :as auth]
             [alpaca.proxy.router :as router]
             [alpaca.proxy.middleware :as mw]))
 
@@ -46,21 +45,13 @@
                :msg "APCA_API_SECRET_KEY not set — cannot connect to Alpaca"})
     (throw (ex-info "Missing APCA_API_SECRET_KEY" {:type :config-error})))
 
-  ;; Stroopwafel root key format
+  ;; Stroopwafel root key must be a kid URN
   (when-let [root-key (:stroopwafel-root-key config)]
-    (when (< (count root-key) 20)
+    (when-not (clojure.string/starts-with? root-key "urn:signet:pk:ed25519:")
       (log/log! {:level :fatal :id ::malformed-root-key
-                 :msg "STROOPWAFEL_ROOT_KEY appears malformed (too short)"
-                 :data {:length (count root-key)}})
-      (throw (ex-info "Malformed STROOPWAFEL_ROOT_KEY" {:type :config-error})))
-    ;; Verify it can be parsed as a public key
-    (try
-      (auth/import-public-key root-key)
-      (catch Exception e
-        (log/log! {:level :fatal :id ::invalid-root-key
-                   :msg "STROOPWAFEL_ROOT_KEY is not a valid Ed25519 public key"
-                   :data {:error (.getMessage e)}})
-        (throw (ex-info "Invalid STROOPWAFEL_ROOT_KEY" {:type :config-error})))))
+                 :msg "STROOPWAFEL_ROOT_KEY must be a signet kid URN (urn:signet:pk:ed25519:...)"
+                 :data {:value root-key}})
+      (throw (ex-info "Malformed STROOPWAFEL_ROOT_KEY" {:type :config-error}))))
 
   ;; Paper vs live safety
   (when-not (:paper? config)
@@ -94,7 +85,7 @@
                        (cond->
                         (= auth-mode :stroopwafel)
                          (mw/wrap-stroopwafel-auth
-                          (auth/import-public-key (:stroopwafel-root-key config))
+                          (:stroopwafel-root-key config)
                           (:roster config)
                           (:proxy-identity config))
 

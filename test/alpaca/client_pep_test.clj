@@ -2,16 +2,18 @@
   "Tests for client-side PEP — outbound policy enforcement."
   (:require [clojure.test :refer [deftest is testing]]
             [alpaca.client-pep :as cpep]
-            [alpaca.auth :as auth]))
+            [alpaca.auth :as auth]
+            [signet.key :as key]))
 
 ;; ---------------------------------------------------------------------------
 ;; Test fixtures
 ;; ---------------------------------------------------------------------------
 
 (def outbound-authority-kp (auth/generate-keypair))
-(def outbound-authority-pub (:pub outbound-authority-kp))
+(def outbound-authority-kid (key/kid outbound-authority-kp))
 
 (def other-authority-kp (auth/generate-keypair))
+(def other-authority-kid (key/kid other-authority-kp))
 
 (defn issue-outbound [grants]
   (cpep/issue-outbound-token outbound-authority-kp grants))
@@ -30,9 +32,9 @@
 (deftest issue-outbound-token-round-trip
   (let [token-str (issue-outbound standard-grants)
         token     (auth/deserialize-token token-str)]
-    (is (map? token))
+    (is (= :signet/chain (:type token)))
     (is (vector? (:blocks token)))
-    (is (= :sealed (get-in token [:proof :type])))))
+    (is (true? (:sealed (:proof token))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Destination + effect + domain checks
@@ -41,7 +43,7 @@
 (deftest approved-destination-and-effect-passes
   (let [token (issue-outbound standard-grants)
         result (cpep/check-outbound
-                token outbound-authority-pub
+                token outbound-authority-kid
                 {:destination "proxy-paper:8080"
                  :effect :read :domain "market"
                  :body {:symbol "AAPL"}})]
@@ -50,7 +52,7 @@
 (deftest unapproved-destination-denied
   (let [token (issue-outbound standard-grants)
         result (cpep/check-outbound
-                token outbound-authority-pub
+                token outbound-authority-kid
                 {:destination "proxy-live:8080"
                  :effect :read :domain "market"
                  :body {:symbol "AAPL"}})]
@@ -60,7 +62,7 @@
 (deftest wrong-effect-denied
   (let [token (issue-outbound standard-grants)
         result (cpep/check-outbound
-                token outbound-authority-pub
+                token outbound-authority-kid
                 {:destination "vendor-b:443"
                  :effect :write :domain "trade"
                  :body {:symbol "AAPL"}})]
@@ -70,7 +72,7 @@
 (deftest wrong-domain-denied
   (let [token (issue-outbound standard-grants)
         result (cpep/check-outbound
-                token outbound-authority-pub
+                token outbound-authority-kid
                 {:destination "proxy-paper:8080"
                  :effect :read :domain "account"
                  :body {}})]
@@ -80,7 +82,7 @@
 (deftest bad-authority-key-denied
   (let [token (issue-outbound standard-grants)
         result (cpep/check-outbound
-                token (:pub other-authority-kp)
+                token other-authority-kid
                 {:destination "proxy-paper:8080"
                  :effect :read :domain "market"
                  :body {:symbol "AAPL"}})]
@@ -94,7 +96,7 @@
 (deftest pii-email-detected
   (let [token (issue-outbound standard-grants)
         result (cpep/check-outbound
-                token outbound-authority-pub
+                token outbound-authority-kid
                 {:destination "proxy-paper:8080"
                  :effect :read :domain "market"
                  :body {:symbol "AAPL" :comment "contact user@example.com"}})]
@@ -104,7 +106,7 @@
 (deftest pii-phone-detected
   (let [token (issue-outbound standard-grants)
         result (cpep/check-outbound
-                token outbound-authority-pub
+                token outbound-authority-kid
                 {:destination "proxy-paper:8080"
                  :effect :read :domain "market"
                  :body {:symbol "AAPL" :note "call 555-123-4567"}})]
@@ -114,7 +116,7 @@
 (deftest clean-body-passes-pii-check
   (let [token (issue-outbound standard-grants)
         result (cpep/check-outbound
-                token outbound-authority-pub
+                token outbound-authority-kid
                 {:destination "proxy-paper:8080"
                  :effect :read :domain "market"
                  :body {:symbol "AAPL"}})]
@@ -123,7 +125,7 @@
 (deftest client-name-caught
   (let [token (issue-outbound standard-grants)
         result (cpep/check-outbound
-                token outbound-authority-pub
+                token outbound-authority-kid
                 {:destination "proxy-paper:8080"
                  :effect :read :domain "market"
                  :body {:symbol "AAPL" :tag "client: Acme Corp"}})]
@@ -135,7 +137,7 @@
                (assoc standard-grants
                       :restrictions #{:no-strategy-in-comments}))
         result (cpep/check-outbound
-                token outbound-authority-pub
+                token outbound-authority-kid
                 {:destination "proxy-paper:8080"
                  :effect :read :domain "market"
                  :body {:symbol "AAPL" :comment "part of Project Phoenix"}})]
@@ -145,7 +147,7 @@
 (deftest no-restrictions-allows-anything
   (let [token (issue-outbound (dissoc standard-grants :restrictions))
         result (cpep/check-outbound
-                token outbound-authority-pub
+                token outbound-authority-kid
                 {:destination "proxy-paper:8080"
                  :effect :read :domain "market"
                  :body {:symbol "AAPL" :comment "user@example.com client: Acme"}})]
@@ -155,7 +157,7 @@
   (testing "PII in nested data structures is still caught"
     (let [token (issue-outbound standard-grants)
           result (cpep/check-outbound
-                  token outbound-authority-pub
+                  token outbound-authority-kid
                   {:destination "proxy-paper:8080"
                    :effect :read :domain "market"
                    :body {:symbol "AAPL"

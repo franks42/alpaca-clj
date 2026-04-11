@@ -3,11 +3,12 @@
 
    Auth modes:
    - Simple: PROXY_TOKEN env var (development)
-   - Stroopwafel: PEP pipeline with configurable canonicalization"
-  (:require [alpaca.proxy.log :as log]
+   - Stroopwafel: capability token auth with HTTP+EDN canonicalization"
+  (:require [alpaca.auth :as auth]
+            [alpaca.pep.http-edn :as http-edn]
+            [alpaca.proxy.log :as log]
             [alpaca.schema :as schema]
-            [alpaca.pep :as pep]
-            [alpaca.pep.http-edn :as http-edn]))
+            [taoensso.trove :as tlog]))
 
 (defn wrap-edn-content-type
   "Set Content-Type: application/edn on all responses."
@@ -32,31 +33,73 @@
            :body   (pr-str {:error "Unauthorized"
                             :message "Invalid or missing Bearer token"})})))))
 
+(defn- deny-response
+  "Build a 401/403 EDN error response for denied requests."
+  [reason status]
+  {:status status
+   :body   (pr-str {:error  (case status 401 "Unauthorized" "Forbidden")
+                    :reason reason})})
+
 (defn wrap-stroopwafel-auth
-  "Stroopwafel capability token auth via the PEP pipeline.
+  "Stroopwafel capability token auth middleware.
 
-   Uses the HTTP+EDN canonicalization template:
-   - Canonicalize: Ring request → canonical envelope (method, path, body, effect, domain)
-   - Extract: Bearer token + X-Agent-Signature header
-   - Authorize: verify token + signature + Datalog policy
-   - Exempt: /health and /api bypass auth
+   Pipeline:
+     1. /health and /api bypass auth (exempt)
+     2. Canonicalize: Ring request → {:method :path :body :effect :domain}
+        (nil → unknown route, pass through to 404 handling)
+     3. Extract Bearer token + X-Agent-Signature header
+     4. Missing token → 401
+     5. verify-and-authorize → allowed: pass to handler, denied: 403
 
-   The canonicalization step is explicit and auditable — it defines the
-   binding between the wire format and the policy evaluation.
-
-   Optional roster for SDSI group-based authorization."
-  ([handler public-key]
-   (wrap-stroopwafel-auth handler public-key nil))
-  ([handler public-key roster]
-   (wrap-stroopwafel-auth handler public-key roster nil))
-  ([handler public-key roster proxy-identity]
-   ((pep/create-pep
-     {:canonicalize  http-edn/canonicalize
-      :extract-creds http-edn/extract-creds
-      :authorize     (http-edn/make-authorize roster proxy-identity)
-      :exempt?       http-edn/exempt?
-      :public-key    public-key})
-    handler)))
+   Optional roster for SDSI group-based authorization.
+   Optional proxy-identity for audience binding."
+  ([handler trust-roots]
+   (wrap-stroopwafel-auth handler trust-roots nil))
+  ([handler trust-roots roster]
+   (wrap-stroopwafel-auth handler trust-roots roster nil))
+  ([handler trust-roots roster proxy-identity]
+   (fn [req]
+     (if (http-edn/exempt? req)
+       (handler req)
+       (let [canonical (http-edn/canonicalize req)]
+         (if (nil? canonical)
+           (handler req)                    ;; unknown route → 404 downstream
+           (let [{:keys [token-str sig-metadata body-str]} (http-edn/extract-creds req)]
+             (if (nil? token-str)
+               (deny-response "Missing Bearer token" 401)
+               (let [result (auth/verify-and-authorize
+                             token-str trust-roots
+                             {:effect (:effect canonical)
+                              :domain (:domain canonical)
+                              :method (keyword (:method canonical))
+                              :path   (:path canonical)}
+                             sig-metadata
+                             (:body canonical)
+                             {:roster roster :proxy-identity proxy-identity})
+                     req    (if (and body-str (not (string? (:body req))))
+                              (assoc req :body body-str)
+                              req)]
+                 (if (:authorized result)
+                   (do (tlog/log!
+                        {:level :debug :id ::request-authorized
+                         :msg   "Request authorized"
+                         :data  (cond-> {:path   (:path canonical)
+                                         :effect (:effect canonical)
+                                         :domain (:domain canonical)}
+                                  (:requester-bound result)
+                                  (assoc :bound? true
+                                         :agent-key-fp (:agent-key-fp result))
+                                  (:request-id result)
+                                  (assoc :request-id (:request-id result)))})
+                       (handler req))
+                   (do (tlog/log!
+                        {:level :warn :id ::request-denied
+                         :msg   "Request denied"
+                         :data  {:path   (:path canonical)
+                                 :effect (:effect canonical)
+                                 :domain (:domain canonical)
+                                 :reason (:reason result)}})
+                       (deny-response (:reason result) 403))))))))))))
 
 (defn wrap-error-handler
   "Catch exceptions and return EDN error responses."

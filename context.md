@@ -3,7 +3,7 @@
 > Current state snapshot for session continuity.
 > Read this + CLAUDE.md + plan.md to get up to speed.
 >
-> Last updated: 2026-03-18, v0.6.1 (tag: v0.6.1, stroopwafel 0.10.0 migration)
+> Last updated: 2026-04-10 — migration to signet + stroopwafel + stroopwafel-pdp
 
 ---
 
@@ -19,7 +19,7 @@ Four-party architecture:
 3. **Proxy** (this project) — verifies token + request signature, forwards to Alpaca
 4. **Alpaca Markets** — sees only the proxy's API credentials
 
-## Current State (v0.6.0)
+## Current State
 
 **10 endpoints** across 3 domains (account, market, trade):
 
@@ -36,109 +36,130 @@ Four-party architecture:
 | /trade/cancel-order | destroy | POST |
 | /trade/close-position | destroy | POST |
 
-**90 tests, 218 assertions, 0 failures.** Run with `bb test`.
+**88 tests, 203 assertions, 0 failures.** Run with `bb test`.
 
 ## Architecture — Key Files
 
 ```
 src/alpaca/
-  config.clj              — env vars, paper/live, roster loading
-  schema.clj              — single source of truth (routes, params, constraints, alpaca mapping)
+  config.clj              — env vars, paper/live, roster loading (kid URNs)
+  schema.clj              — single source of truth (routes, params, alpaca mapping)
   client.clj              — HTTP client to Alpaca REST (JSON internally, EDN at boundary)
   keys.clj                — expand terse Alpaca keys (bp→bid-price, o→open)
-  envelope.clj            — generic signed envelope: sign/verify (message-opaque)
-  auth.clj                — token issuance, verification, authorization (uses envelope)
-  ssh.clj                 — SSH Ed25519 key import (standalone, no alpaca deps)
+  auth.clj                — token issue/sign/verify/authorize (bearer/bound/group modes)
   telemetry.clj           — trove/timbre bootstrap, stderr routing
-  pep.clj                 — PEP pipeline abstraction (canonicalize→extract→authorize→allow/deny)
-  pep/http_edn.clj        — HTTP+EDN canonicalization template for the PEP
+  pep/http_edn.clj        — HTTP+EDN canonicalization for the auth middleware
   proxy/
-    server.clj            — http-kit lifecycle, PID file, startup validation, trust-state logging
-    router.clj             — fn-as-URL routing from schema (structural whitelist)
-    middleware.clj          — auth middleware (simple/stroopwafel/multi-root), logging, error handling
-    handlers.clj           — request validation (types, enums, conditional requires, mutex) + Alpaca forwarding
-    log.clj                — structured request logging with token fingerprint + agent key
+    server.clj            — http-kit lifecycle, PID file, startup validation
+    router.clj            — fn-as-URL routing from schema (structural whitelist)
+    middleware.clj        — auth middleware (simple/stroopwafel), logging, error handling
+    handlers.clj          — request validation + Alpaca forwarding
+    log.clj               — structured request logging
+
   cli/
-    api.clj                — unified CLI: bb api <operation> [--flags]
-    common.clj             — proxy HTTP client with optional agent request signing
-    token.clj              — bb token generate-keys/issue/issue-group/inspect
+    api.clj               — unified CLI: bb api <operation> [--flags]
+    common.clj            — proxy HTTP client with optional agent request signing
+    token.clj             — bb token generate-keys/issue/issue-group/inspect
     account.clj, market.clj, trading.clj — legacy convenience aliases
 
 test/alpaca/
-  router_test.clj          — 18 tests: routes, 404/405, params, schema validation, business rules
-  auth_test.clj            — 42 tests: bearer, SPKI, SDSI, replay, envelope, audience, multi-root, hex
-  pep_test.clj             — 10 tests: canonicalization, exemption, credentials, pipeline composition
-  keys_test.clj            — 5 tests: key expansion
-  ssh_test.clj             — 5 tests: SSH key import, envelope integration
-  envelope_test.clj        — 15 tests: sign/verify, tampering, expiry, opacity, digests, serialization
-
-docs/
-  authorization-progression.md     — bearer→SPKI→SDSI→federated (one mechanism, four levels)
-  trust-roots-and-enforcement.md   — enforcement actor as trust root, multi-authority scoped trust
-  dual-pep-client-server-enforcement.md — client-side + server-side PEP
-  stroopwafel-envelope-spec.md     — generic signed envelope spec (IMPLEMENTED, with quorum section)
-  alpaca-clj-review-gpt.md         — first GPT review
-  alpaca-clj-review-gpt-2.md       — second GPT review (all P0-P2 addressed)
-  alpaca-clj-review-gemini.md      — first Gemini review
-  alpaca-clj-review-gemini-2.md    — second Gemini review
+  router_test.clj         — 17 tests: routes, 404/405, validation
+  auth_test.clj           — 32 tests: bearer, bound, group, replay, audience, multi-root
+  http_edn_test.clj       — 9 tests: canonicalize + extract-creds + exempt
+  keys_test.clj           — 5 tests: key expansion
+  ssh_test.clj            — 6 tests: SSH key import, end-to-end with alpaca tokens
+  client_pep_test.clj     — 13 tests: outbound policy + PII/client-name/strategy checks
+  dual_pep_test.clj       — 7 tests: full client+server PEP integration
 ```
 
-## Authorization Model
+## The Three-Library Auth Stack
 
-**Two-step verify+authorize** (since v0.5.2):
+This project sits on top of three focused libraries:
 
-Step 1 (crypto): Token carries `[:signer-key <pk-bytes>]`. Verify signature
-against the stated key. This step knows nothing about trust.
+```
+signet              — crypto primitives (Ed25519 keys, signing, chains, SSH import)
+stroopwafel         — pure Datalog engine (evaluate facts → decision, zero deps)
+stroopwafel-pdp     — PDP bridge (verify chains → extract facts → evaluate)
+```
 
-Step 2 (policy): Trust-root facts + token facts + request facts all go into
-Datalog. The join `[:signer-key ?k] ∧ [:trusted-root ?k effect domain]`
-decides if the signer is trusted for this operation.
+**alpaca.auth** is the policy orchestrator:
+1. Dispatch on token shape → `:bearer` / `:bound` / `:group`
+2. Build a PDP context: `add-chain` (verifies signatures), `add-facts`
+   (inject `[:chain-root kid]`, trust-root facts, roster facts)
+3. For bound/group: verify the signed-request envelope binds to the actual
+   request (method/path/body/audience), check replay
+4. `pdp/decide` with one policy per mode, joining chain facts + local facts
+   through a shared `[:trusted-ok]` rule
 
-**Four auth levels working:**
-- Bearer — `[:effect :read] [:domain "market"]`
-- SPKI — `[:authorized-agent-key <pk>]` + signed request envelope
-- SDSI groups — `[:right "traders" :read "market"]` + roster file + signed request
-- Multi-root — `{pk-bytes → {:scoped-to {:effects #{:write} :domains #{"trade"}}}}`
+Every identity is a **kid URN** (`urn:signet:pk:ed25519:<base64url>`) — no
+hex, no JCA PublicKey objects, no `[:signer-key bytes]` facts in tokens.
+Trust is expressed as `[:trusted-root kid effect domain]` Datalog facts.
 
-**Replay protection:** UUIDv7 as combined timestamp+nonce. 120s freshness window + in-memory nonce cache.
+## Authorization Modes
 
-**Envelope signing (v0.6.0):** Generic `alpaca.envelope/sign` wraps any EDN
-message in `{:envelope {:message :signer-key :request-id :expires} :signature}`.
-`alpaca.auth` passes `{:method :path :body [:audience]}` as the message.
-Verify returns `:digest` (full envelope hash) and `:message-digest` (message-only
-hash, for multi-signature quorum comparison).
+**Bearer** — token carries `[:effect ...]`, `[:domain ...]`. Policy:
+```
+[:effect effect] [:domain domain] [:trusted-ok]
+```
 
-**Business-rule validation:** Declarative constraints in schema:
-- `{:enum {:side ["buy" "sell"]}}` — value must be in set
-- `{:when {:type "limit"} :require [:limit_price]}` — conditional required
-- `{:mutex [:qty :percentage]}` — at most one
+**Bound (SPKI)** — token adds `[:authorized-agent-key <kid>]`. Requires
+signed-request envelope. Policy:
+```
+[:effect effect] [:domain domain]
+[:authorized-agent-key ?k] [:request-verified-signer ?k]
+[:trusted-ok]
+```
 
-## Envelope Design
+**Group (SDSI)** — token carries `[:right <group> <effect> <domain>]`.
+Requires signed envelope + named-key roster. Policy:
+```
+[:right ?name effect domain] [:named-key ?name ?k]
+[:request-verified-signer ?k] [:trusted-ok]
+```
 
-**`alpaca.envelope`** — message-opaque signed envelope (~80 lines):
-- `sign [message priv-key pub-key ttl-seconds]` → outer envelope
-- `verify [outer-envelope]` → `{:valid? :message :signer-key :request-id :timestamp :expires :expired? :age-ms :digest :message-digest}`
-- `serialize` / `deserialize` — CEDN round-trip for transport
+All three share this rule, covering unscoped (`:any`) and scoped trust:
+```clojure
+[{:id :trusted-any
+  :head [:trusted-ok]
+  :body [[:chain-root ?k] [:trusted-root ?k :any :any]]}
+ {:id :trusted-scoped
+  :head [:trusted-ok]
+  :body [[:chain-root ?k] [:trusted-root ?k effect domain]]}]
+```
 
-**Key properties:**
-- `:expires` is absolute epoch-ms (signer thinks in TTL, envelope stores absolute)
-- `:signer-key` embedded — self-describing, no lookup needed
-- `:digest` = SHA-256(CEDN(inner)) — unique per envelope
-- `:message-digest` = SHA-256(CEDN(message)) — same across signers of same message
-- Verify reports but doesn't reject expired envelopes — caller decides
+**Replay protection:** UUIDv7 as combined timestamp+nonce. 120s freshness
+window + in-memory nonce cache via `stroopwafel.pdp.replay`.
 
-**Multi-signature quorum** (designed, not yet implemented):
-- Each judge independently signs the same message → separate envelopes
-- Compare `:message-digest` to confirm agreement
-- Consensus validity = overlap of all intervals: `(max timestamps, min expires)`
-- Threshold check is a Datalog rule over `[:panel-approved signer-key message-digest]`
+**Envelope content binding:** `alpaca.auth/check-envelope-binding` verifies
+the signed envelope's claimed method/path/body/audience match the actual
+request. This is alpaca-specific and lives outside the PDP (which only
+verifies signatures).
 
-## What's Next
+## Migration History
 
-- **Phase 4** — Extended endpoint coverage (assets, watchlists, crypto, options)
-- **Phase 4b** — Dual PEP / client-side enforcement with audience verification
-- **Phase 5** — Production hardening (trust bootstrap, audit log, temporal constraints)
-- **Migration** — Move envelope, ssh, pep, replay, hex utils to stroopwafel repo
+**Completed 2026-04-10** — rewrote alpaca-clj on the three-library stack:
+
+| Before | After |
+|---|---|
+| `alpaca.envelope` (thin pass-through) | **deleted** — call `signet.sign` directly |
+| `alpaca.ssh` (thin pass-through) | **deleted** — call `signet.ssh` directly |
+| `alpaca.pep` (one-caller abstraction) | **deleted** — pipeline inlined in middleware |
+| `alpaca.auth` 437 lines | **~280 lines**, three PDP calls vs three hand-written `sw/evaluate` |
+| `alpaca.client-pep` 213 lines | **~180 lines**, PDP for outbound token verification |
+| `[:signer-key bytes]` token facts | removed — `chain/verify`'s `:root` kid is the identity |
+| Hex utilities | removed — kid URNs at all boundaries |
+| Keyfile `{:priv PKCS8 :pub X.509}` | `{:x :d}` raw bytes via CEDN `#bytes` |
+| `STROOPWAFEL_ROOT_KEY` as hex | kid URN string |
+| Roster hex pk bytes | kid URN strings |
+
+Net: ~790 lines removed (source + tests).
+
+**Bug fixes during migration** (both in signet, for babashka compatibility):
+- `signet.sign/sign` used to indirect through `signing-private-key` + `register!`,
+  which triggered `ed25519-seed->public-key` → `proxy SecureRandom` — bb can't
+  proxy concrete classes. Fix: read `:d` directly.
+- `signet.ssh/read-private-key` re-derived the public key via the same broken
+  path. Fix: use the pubkey already embedded in the OpenSSH private blob.
 
 ## Dependencies
 
@@ -147,36 +168,46 @@ hash, for multi-signature quorum comparison).
 | http-kit | 2.8.1 | HTTP server + client |
 | cheshire | 6.1.0 | JSON (Alpaca REST) |
 | cedn | 1.2.0 | Canonical EDN serialization |
-| stroopwafel | 0.10.0 | Capability tokens + envelope + ssh + pep |
+| signet | local | Crypto primitives (Ed25519, chains, SSH) |
+| stroopwafel | local | Pure Datalog engine |
+| stroopwafel-pdp | local | PDP bridge |
 | uuidv7 | 0.5.0 | Timestamp + nonce |
 | trove | 1.1.0 | Structured logging |
 | timbre | 6.8.0 | Logging backend |
 
-## Migration Status (alpaca-clj → stroopwafel repo)
+## Keyfile Format
 
-**Done (stroopwafel 0.10.0):**
-- `alpaca.envelope` → `stroopwafel.envelope` (sign/verify/serialize/deserialize)
-- `alpaca.ssh` → `stroopwafel.ssh` (SSH Ed25519 key import)
-- `alpaca.pep` → `stroopwafel.pep` (PEP pipeline, logging via :log-fn)
-- `bytes->hex` / `hex->bytes` → `stroopwafel.crypto`
+Keyfiles live at `.stroopwafel-root.edn`, `.stroopwafel-agent.edn`,
+`.stroopwafel-outbound.edn`. All gitignored. Format:
 
-**Remaining:**
-- `alpaca.pep.http-edn` — stays in alpaca-clj (depends on alpaca.schema)
-- Replay protection utilities
-- `trust-root-facts` helper
+```clojure
+{:x #bytes "..."   ;; 32-byte Ed25519 public key
+ :d #bytes "..."}  ;; 32-byte Ed25519 seed
+```
+
+Loaded via `(signet.key/signing-keypair x d)`.
+
+## Roster Format
+
+`.stroopwafel-roster.edn` (or `$STROOPWAFEL_ROSTER`):
+
+```clojure
+{"traders"  ["urn:signet:pk:ed25519:..." "urn:signet:pk:ed25519:..."]
+ "monitors" ["urn:signet:pk:ed25519:..."]}
+```
 
 ## Key Commands
 
 ```bash
-bb test                    # 90 tests, 218 assertions
-bb server:start &          # start proxy
-bb server:stop             # stop proxy
-bb server:status           # check running
-bb api help                # list operations
-bb api market/clock        # call proxy
-bb token generate-keys     # root keypair
-bb token generate-agent-keys # agent keypair
-bb token issue-read-only   # bearer token
+bb test                       # 88 tests
+bb lint && bb fmt             # quality checks (MUST be 0/0)
+bb server:start &             # start proxy
+bb server:stop                # stop proxy
+bb api help                   # list operations
+bb api market/clock           # call proxy
+bb token generate-keys        # root keypair
+bb token generate-agent-keys  # agent keypair
+bb token issue-read-only      # bearer token
 bb token issue-group --group traders --effects read --domains market
-bb lint && bb fmt          # quality checks
+bb token inspect <token>      # show token structure
 ```

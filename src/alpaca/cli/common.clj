@@ -2,12 +2,12 @@
   "Shared CLI utilities — parse args, call proxy, print EDN.
    Supports optional agent request signing for requester-bound tokens."
   (:require [org.httpkit.client :as http]
+            [cedn.core :as cedn] ;; cedn/readers used at runtime
             [clojure.edn :as edn]
             [clojure.pprint]))
 
 (defn parse-flags
-  "Parse --key value pairs from command-line args into a map.
-   Returns map with keyword keys."
+  "Parse --key value pairs from command-line args into a map."
   [args]
   (loop [remaining args
          result   {}]
@@ -19,32 +19,25 @@
           (recur (next remaining) result))))))
 
 (defn proxy-url
-  "Build proxy URL from env or defaults."
   []
   (let [host (or (System/getenv "PROXY_HOST") "127.0.0.1")
         port (or (System/getenv "PROXY_PORT") "8080")]
     (str "http://" host ":" port)))
 
 (defn- load-agent-keypair
-  "Load agent keypair from .stroopwafel-agent.edn if it exists."
+  "Load agent keypair from .stroopwafel-agent.edn if it exists.
+   Returns a signet Ed25519KeyPair or nil."
   []
   (let [f (java.io.File. ".stroopwafel-agent.edn")]
     (when (.exists f)
-      (require 'alpaca.auth)
-      (require 'cedn.core)
-      (let [readers    @(resolve 'cedn.core/readers)
-            data       (edn/read-string {:readers readers} (slurp f))
-            bytes->hex @(resolve 'alpaca.auth/bytes->hex)
-            import-pk  @(resolve 'alpaca.auth/import-public-key)
-            kf         (java.security.KeyFactory/getInstance "Ed25519")
-            priv       (.generatePrivate kf (java.security.spec.PKCS8EncodedKeySpec. (:priv data)))
-            pub        (import-pk (bytes->hex (:pub data)))]
-        {:priv priv :pub pub}))))
+      (require 'signet.key)
+      (let [sk           @(resolve 'signet.key/signing-keypair)
+            {:keys [x d]} (edn/read-string {:readers cedn/readers} (slurp f))]
+        (sk x d)))))
 
 (defn- sign-and-add-header
-  "If STROOPWAFEL_AGENT_SIGN=true and agent keypair exists,
-   sign the request envelope (method + path + body + UUIDv7 request-id)
-   and add X-Agent-Signature header."
+  "If STROOPWAFEL_AGENT_SIGN=true and an agent keyfile exists,
+   sign the request envelope and add the X-Agent-Signature header."
   [headers method path body]
   (if-not (= "true" (System/getenv "STROOPWAFEL_AGENT_SIGN"))
     headers
@@ -61,15 +54,7 @@
           headers))))
 
 (defn call-proxy!
-  "Call the proxy server and return the EDN response.
-
-   Arguments:
-     method — :get or :post
-     path   — e.g. \"/market/quote\"
-     body   — EDN map (for POST) or nil
-
-   When STROOPWAFEL_AGENT_SIGN=true, signs the full request envelope
-   (method + path + body + UUIDv7 request-id) with the agent key."
+  "Call the proxy server and return the EDN response."
   [method path body]
   (let [url     (str (proxy-url) path)
         token   (or (System/getenv "STROOPWAFEL_TOKEN")
@@ -92,7 +77,6 @@
               (System/exit 1)))))))
 
 (defn print-edn
-  "Pretty-print an EDN value."
   [v]
   (binding [*print-namespace-maps* false]
     (clojure.pprint/pprint v)))

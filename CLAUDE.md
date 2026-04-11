@@ -22,14 +22,12 @@ alpaca-clj/
 │   ├── config.clj              # API keys from env, base URLs, paper/live
 │   ├── client.clj              # HTTP client for Alpaca REST (JSON internally)
 │   ├── schema.clj              # Predicate schema (single source of truth)
-│   ├── auth.clj                # Stroopwafel token auth (bearer, SPKI, SDSI)
-│   ├── envelope.clj            # Signed envelope delegation to stroopwafel
-│   ├── ssh.clj                 # SSH key import delegation to stroopwafel
-│   ├── keys.clj                # Key file I/O
+│   ├── auth.clj                # Capability token auth (bearer, bound, group)
+│   ├── keys.clj                # Alpaca response key expansion
 │   ├── client_pep.clj          # Client-side PEP (outbound policy enforcement)
 │   ├── telemetry.clj           # Structured logging (trove/timbre)
 │   ├── pep/
-│   │   └── http_edn.clj        # Server-side PEP for HTTP+EDN wire format
+│   │   └── http_edn.clj        # HTTP+EDN canonicalization for the middleware
 │   ├── cli/
 │   │   ├── api.clj             # Unified CLI: bb api <operation>
 │   │   ├── token.clj           # Token management CLI
@@ -187,7 +185,9 @@ export PROXY_TOKEN="shared-secret"    # Phase 1 simple auth
 | `org.httpkit/http-kit` | HTTP server + client | Maven |
 | `cheshire/cheshire` | JSON parsing (Alpaca REST) | Maven |
 | `com.github.franks42/cedn` | Canonical EDN | `../canonical-edn` or Maven |
-| `com.github.franks42/stroopwafel` | Capability token auth | `../stroopwafel` (local) |
+| `com.github.franks42/signet` | Crypto primitives (Ed25519, chains, SSH import) | `../signet` (local) |
+| `com.github.franks42/stroopwafel` | Pure Datalog engine (zero deps) | `../stroopwafel` (local) |
+| `com.github.franks42/stroopwafel-pdp` | PDP bridge (verify chains → extract facts → evaluate) | `../stroopwafel-pdp` (local) |
 | `com.github.franks42/uuidv7` | UUIDv7 (replay protection, request-ids) | Maven |
 | `com.taoensso/trove` | Structured logging | Maven |
 | `com.taoensso/timbre` | Logging backend | Maven |

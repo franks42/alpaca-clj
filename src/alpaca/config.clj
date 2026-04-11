@@ -5,11 +5,11 @@
 
 (defn- load-roster
   "Load the group roster from an EDN file if it exists.
-   The roster maps group names to lists of agent public key hex strings.
+   The roster maps group names to vectors of agent kid URN strings.
 
    Example roster.edn:
-     {\"traders\" [\"302a300506032b6570...\" \"302a300506032b6570...\"]
-      \"monitors\" [\"302a300506032b6570...\"]}
+     {\"traders\"  [\"urn:signet:pk:ed25519:...\" \"urn:signet:pk:ed25519:...\"]
+      \"monitors\" [\"urn:signet:pk:ed25519:...\"]}
 
    File path from STROOPWAFEL_ROSTER env var (default: .stroopwafel-roster.edn)."
   []
@@ -23,7 +23,7 @@
    Returns a config map used by the client and proxy.
 
    Auth modes (checked in order):
-   1. STROOPWAFEL_ROOT_KEY — hex-encoded public key → Stroopwafel auth
+   1. STROOPWAFEL_ROOT_KEY — kid URN (urn:signet:pk:ed25519:...) → Stroopwafel auth
    2. PROXY_TOKEN — shared secret → simple Bearer token auth
    3. Neither set → auth disabled (development mode)"
   []

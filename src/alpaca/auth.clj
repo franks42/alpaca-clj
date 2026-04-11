@@ -1,18 +1,25 @@
 (ns alpaca.auth
-  "Stroopwafel token authentication for the proxy.
+  "Token authentication and authorization for the alpaca-clj proxy.
 
-   Three auth modes:
-   - Bearer-only: token in Authorization header (effect + domain + trust root)
-   - Requester-bound SPKI: token + signed envelope + agent key binding
-   - Requester-bound SDSI: token + signed envelope + roster group membership
+   Three authorization modes, dispatched by token shape:
 
-   Delegates to stroopwafel for replay protection, trust-root facts,
-   cryptographic primitives, and envelope signing/verification."
-  (:require [stroopwafel.core :as sw]
-            [stroopwafel.crypto :as sw-crypto]
-            [stroopwafel.replay :as replay]
-            [stroopwafel.trust :as trust]
-            [alpaca.envelope :as envelope]
+     :bearer  — token carries [:effect ...] and [:domain ...] facts
+     :bound   — token also carries [:authorized-agent-key <kid>]
+                (requires a signed request envelope)
+     :group   — token carries [:right <group> <effect> <domain>]
+                (requires a signed envelope + a named-key roster)
+
+   All three modes use the same machinery:
+     - signet.chain        — capability chain tokens
+     - signet.sign         — per-request envelope signing
+     - stroopwafel.pdp     — PDP bridge (verifies, extracts facts, evaluates)
+     - stroopwafel.core    — Datalog engine (via pdp/decide)"
+  (:require [signet.chain :as chain]
+            [signet.key :as key]
+            [signet.sign :as sign]
+            [stroopwafel.pdp.core :as pdp]
+            [stroopwafel.pdp.trust :as trust]
+            [stroopwafel.pdp.replay :as replay]
             [cedn.core :as cedn] ;; cedn/readers used at runtime
             [clojure.edn :as edn]
             [taoensso.trove :as log]))
@@ -22,47 +29,21 @@
 ;; ---------------------------------------------------------------------------
 
 (defn generate-keypair
-  "Generate a new Ed25519 keypair.
-   Returns {:priv PrivateKey :pub PublicKey}."
+  "Generate a new Ed25519 signing keypair (signet record)."
   []
-  (sw/new-keypair))
-
-(defn export-public-key
-  "Export public key as hex string for configuration/display."
-  [kp]
-  (sw-crypto/export-public-key-hex (:pub kp)))
-
-(defn public-key-bytes
-  "Get the encoded public key bytes for embedding in token facts."
-  [kp]
-  (sw-crypto/encode-public-key (:pub kp)))
-
-(defn import-public-key
-  "Import public key from hex string."
-  [hex]
-  (sw-crypto/import-public-key-hex hex))
-
-(defn hex->bytes
-  "Convert hex string to byte array."
-  [hex]
-  (sw-crypto/hex->bytes hex))
-
-(defn bytes->hex
-  "Convert byte array to hex string."
-  [bs]
-  (sw-crypto/bytes->hex bs))
+  (key/signing-keypair))
 
 ;; ---------------------------------------------------------------------------
 ;; Token serialization (CEDN with #bytes support)
 ;; ---------------------------------------------------------------------------
 
 (defn serialize-token
-  "Serialize a sealed token to a CEDN string for transport."
+  "Serialize a sealed chain token to a CEDN string for transport."
   [token]
   (cedn/canonical-str token))
 
 (defn deserialize-token
-  "Deserialize a CEDN string back to a token map."
+  "Deserialize a CEDN string back to a chain token map."
   [s]
   (edn/read-string {:readers cedn/readers} s))
 
@@ -71,76 +52,49 @@
 ;; ---------------------------------------------------------------------------
 
 (defn issue-token
-  "Issue a new capability token for proxy access.
+  "Issue a new capability token.
 
    Arguments:
-     root-kp      — root keypair {:priv :pub}
-     grants       — map of grants:
-       :effects     — set of allowed effect classes #{:read :write :destroy}
-       :domains     — set of allowed domains #{\"market\" \"account\" \"trade\"}
-       :agent-key   — (optional) agent public key bytes for requester binding
+     root-kp — signet Ed25519 keypair (the trust anchor)
+     grants  — map:
+       :effects   — set of allowed effects #{:read :write :destroy}
+       :domains   — set of allowed domains #{\"market\" \"account\" \"trade\"}
+       :agent-key — (optional) agent's kid URN string for requester binding
 
-   Returns: sealed token string (CEDN) ready for Bearer header."
+   Returns: sealed chain token serialized as a CEDN string."
   [root-kp {:keys [effects domains agent-key]}]
-  (let [signer-pk    (sw-crypto/encode-public-key (:pub root-kp))
-        effect-facts (mapv (fn [e] [:effect e]) effects)
+  (let [effect-facts (mapv (fn [e] [:effect e]) effects)
         domain-facts (mapv (fn [d] [:domain d]) domains)
-        all-facts    (cond-> (into [[:signer-key signer-pk]] (concat effect-facts domain-facts))
+        facts        (cond-> (vec (concat effect-facts domain-facts))
                        agent-key (conj [:authorized-agent-key agent-key]))
-        token        (sw/issue
-                      {:facts all-facts}
-                      {:private-key (:priv root-kp) :public-key (:pub root-kp)})
-        sealed       (sw/seal token)]
-    (serialize-token sealed)))
+        token        (-> (chain/extend root-kp {:facts facts})
+                         (chain/close))]
+    (serialize-token token)))
 
 (defn issue-group-token
-  "Issue a capability token for SDSI group-based authorization.
+  "Issue an SDSI group-based token.
 
    Arguments:
-     root-kp — root keypair {:priv :pub}
-     grants  — map of grants:
+     root-kp — signet Ed25519 keypair
+     grants  — map:
        :rights — vector of [group-name effect domain] triples
 
-   Example:
-     (issue-group-token root-kp
-       {:rights [[\"traders\" :read \"market\"]
-                 [\"traders\" :write \"trade\"]]})
-
-   Returns: sealed token string (CEDN) ready for Bearer header."
+   Returns: sealed chain token serialized as a CEDN string."
   [root-kp {:keys [rights]}]
-  (let [signer-pk   (sw-crypto/encode-public-key (:pub root-kp))
-        right-facts (mapv (fn [[group effect domain]]
-                            [:right group effect domain])
-                          rights)
-        all-facts   (into [[:signer-key signer-pk]] right-facts)
-        token       (sw/issue
-                     {:facts all-facts}
-                     {:private-key (:priv root-kp) :public-key (:pub root-kp)})
-        sealed      (sw/seal token)]
-    (serialize-token sealed)))
+  (let [facts (mapv (fn [[g e d]] [:right g e d]) rights)
+        token (-> (chain/extend root-kp {:facts facts})
+                  (chain/close))]
+    (serialize-token token)))
 
 ;; ---------------------------------------------------------------------------
 ;; Request envelope signing (agent side)
 ;; ---------------------------------------------------------------------------
 
 (defn sign-request
-  "Sign a request envelope with the agent's private key.
+  "Sign a request envelope with the agent's keypair.
 
-   The message includes method, path, body, and an optional audience
-   (proxy identity). The envelope layer adds signer-key, request-id,
-   and expires.
-
-   Arguments:
-     method      — HTTP method keyword (:get, :post)
-     path        — route path string (\"/market/quote\")
-     body        — EDN map (request body, or {} for GET)
-     agent-kp    — agent keypair {:priv :pub}
-     audience    — (optional) proxy identity string (e.g. host:port)
-     ttl-seconds — (optional) envelope TTL in seconds (default 120)
-
-   Returns: outer envelope {:envelope {:message ... :signer-key ...
-                                       :request-id ... :expires ...}
-                            :signature <bytes>}"
+   Message carries method/path/body and an optional audience string.
+   signet.sign adds signer kid, request-id (UUIDv7), and :expires."
   ([method path body agent-kp]
    (sign-request method path body agent-kp nil))
   ([method path body agent-kp audience]
@@ -150,287 +104,247 @@
                           :path   path
                           :body   (or body {})}
                    audience (assoc :audience audience))]
-     (envelope/sign message (:priv agent-kp) (:pub agent-kp) ttl-seconds))))
+     (sign/sign-edn agent-kp message {:ttl ttl-seconds}))))
 
 (defn serialize-signed-request
-  "Serialize the outer envelope as CEDN for the X-Agent-Signature header."
-  [outer]
-  (envelope/serialize outer))
+  "Serialize a signed envelope as CEDN for the X-Agent-Signature header."
+  [envelope]
+  (cedn/canonical-str envelope))
 
 (defn deserialize-sig-metadata
-  "Deserialize signature metadata from header value."
+  "Deserialize signature metadata from a header value."
   [s]
-  (envelope/deserialize s))
+  (edn/read-string {:readers cedn/readers} s))
 
 ;; ---------------------------------------------------------------------------
-;; Replay protection (delegated to stroopwafel.replay)
+;; Replay protection (module-level guard, 120s freshness window)
 ;; ---------------------------------------------------------------------------
 
 (def ^:private replay-guard
-  "Module-level replay guard with default 2-minute freshness window."
   (replay/create-replay-guard))
 
 ;; ---------------------------------------------------------------------------
-;; Token verification and authorization
+;; Envelope binding check (method/path/body/audience + replay)
+;;
+;; PDP's add-signed-envelope only verifies the signature. The agent-binding
+;; integrity check (did the signer actually endorse THIS method/path/body
+;; on THIS proxy?) is alpaca-specific and lives here.
 ;; ---------------------------------------------------------------------------
 
-(defn- agent-key-fingerprint
-  "Short hex fingerprint of an agent public key (first 16 hex chars)."
-  [key-bytes]
-  (when key-bytes
-    (subs (bytes->hex key-bytes) 0 (min 16 (* 2 (count key-bytes))))))
+(defn- check-envelope-binding
+  "Verify a signed envelope's claimed fields match the actual request
+   and pass replay protection. Returns nil if OK, or an error string."
+  [sig-meta actual-method actual-path actual-body proxy-identity]
+  (let [verified (sign/verify-edn sig-meta)]
+    (if-not (:valid? verified)
+      "Request signature verification failed"
+      (let [{:keys [message request-id]} verified
+            {env-method :method env-path :path env-body :body
+             env-audience :audience} message]
+        (cond
+          (not= env-method (name actual-method))
+          (str "Signed method '" env-method
+               "' does not match actual method '" (name actual-method) "'")
 
-(defn- check-bearer-only
-  "Evaluate a bearer-only token (no requester binding).
-   Checks effect + domain + signer trust via Datalog."
-  [token effect domain trust-root-fcts]
-  (let [result (sw/evaluate token
-                            :explain? true
-                            :authorizer
-                            {:facts (into [[:requested-effect effect]
-                                           [:requested-domain domain]]
-                                          trust-root-fcts)
-                             :rules [{:id   :signer-trusted
-                                      :head [:signer-ok '?k]
-                                      :body [[:signer-key '?k]
-                                             [:trusted-root '?k effect domain]]}
-                                     ;; Also allow :any scope (legacy single-root)
-                                     {:id   :signer-trusted-any
-                                      :head [:signer-ok '?k]
-                                      :body [[:signer-key '?k]
-                                             [:trusted-root '?k :any :any]]}]
-                             :checks [{:id    :check-effect
-                                       :query [[:effect effect]]}
-                                      {:id    :check-domain
-                                       :query [[:domain domain]]}]
-                             :policies [{:kind :allow
-                                         :query [[:signer-ok '?k]]}]})]
-    (if (:valid? result)
+          (not= env-path actual-path)
+          (str "Signed path '" env-path
+               "' does not match actual path '" actual-path "'")
+
+          (not= env-body (or actual-body {}))
+          "Signed body does not match actual request body"
+
+          (and env-audience proxy-identity (not= env-audience proxy-identity))
+          (str "Audience mismatch: request signed for '" env-audience
+               "' but this proxy is '" proxy-identity "'")
+
+          :else
+          (replay/check replay-guard request-id))))))
+
+;; ---------------------------------------------------------------------------
+;; Token shape inspection (pre-verification, dispatch only)
+;; ---------------------------------------------------------------------------
+
+(defn- token-facts
+  "Extract all facts from a chain token's blocks.
+   UNVERIFIED — use only to determine auth mode, never as authorization data."
+  [token]
+  (vec (mapcat (fn [block]
+                 (get-in block [:envelope :message :data :facts]))
+               (:blocks token))))
+
+(defn- token-mode
+  [facts]
+  (cond
+    (some #(= :right (first %)) facts)                :group
+    (some #(= :authorized-agent-key (first %)) facts) :bound
+    :else                                             :bearer))
+
+;; ---------------------------------------------------------------------------
+;; Authorizer ingredients
+;; ---------------------------------------------------------------------------
+
+(defn- roster-facts
+  "Convert roster map {group-name [kid-urn ...]} to [:named-key group kid] facts."
+  [roster]
+  (when roster
+    (into []
+          (mapcat (fn [[group kids]]
+                    (map (fn [k] [:named-key group k]) kids)))
+          roster)))
+
+(defn- trust-ok-rules
+  "Rules that define [:trusted-ok] for a given effect/domain pair.
+   Two rules cover unscoped (:any) and scoped trust roots."
+  [effect domain]
+  [{:id   :trusted-any
+    :head [:trusted-ok]
+    :body [[:chain-root '?k] [:trusted-root '?k :any :any]]}
+   {:id   :trusted-scoped
+    :head [:trusted-ok]
+    :body [[:chain-root '?k] [:trusted-root '?k effect domain]]}])
+
+(defn- agent-fingerprint
+  "Short kid fingerprint for audit logging (tail 16 chars of base64url)."
+  [kid-str]
+  (when kid-str
+    (let [n (count kid-str)]
+      (subs kid-str (max 0 (- n 16))))))
+
+;; ---------------------------------------------------------------------------
+;; Mode-specific authorize helpers
+;;
+;; Each builds a PDP context, injects local facts (chain-root, request-
+;; verified-signer, trust-root facts, roster facts), and runs one policy.
+;; ---------------------------------------------------------------------------
+
+(defn- authorize-bearer
+  [token trust-roots effect domain]
+  (let [tr-facts (trust/trust-root-facts trust-roots)
+        ctx      (-> (pdp/context)
+                     (pdp/add-chain token {})
+                     (pdp/add-facts (into [[:chain-root (:root token)]] tr-facts)))
+        result   (pdp/decide ctx
+                             :rules (trust-ok-rules effect domain)
+                             :policies [{:kind  :allow
+                                         :query [[:effect effect]
+                                                 [:domain domain]
+                                                 [:trusted-ok]]}])]
+    (if (:allowed? result)
       {:authorized true}
       {:authorized false
        :reason (str "Token does not grant " (name effect)
                     " access to " domain
-                    " (or signer not trusted for this scope)")
-       :explain (:explain result)})))
+                    " (or signer not trusted for this scope)")})))
 
-(defn- verify-envelope
-  "Verify the signed envelope matches the actual request and passes
-   freshness/replay checks. Returns nil if OK, or error map if not.
-   Also checks audience if present in the message.
+(defn- authorize-bound
+  [token trust-roots effect domain sig-meta method path body proxy-identity]
+  (if-let [err (check-envelope-binding sig-meta method path body proxy-identity)]
+    {:authorized false :reason err}
+    (let [verified (sign/verify-edn sig-meta)
+          signer   (:signer verified)
+          tr-facts (trust/trust-root-facts trust-roots)
+          ctx      (-> (pdp/context)
+                       (pdp/add-chain token {})
+                       (pdp/add-facts (into [[:chain-root (:root token)]
+                                             [:request-verified-signer signer]]
+                                            tr-facts)))
+          result   (pdp/decide ctx
+                               :rules (trust-ok-rules effect domain)
+                               :policies [{:kind  :allow
+                                           :query [[:effect effect]
+                                                   [:domain domain]
+                                                   [:authorized-agent-key '?k]
+                                                   [:request-verified-signer '?k]
+                                                   [:trusted-ok]]}])]
+      (if (:allowed? result)
+        {:authorized      true
+         :requester-bound true
+         :request-id      (:request-id verified)
+         :agent-key-fp    (agent-fingerprint signer)}
+        {:authorized false
+         :reason     "Token not bound to this agent key"}))))
 
-   After the envelope refactor, the message contains method/path/body/audience,
-   while request-id lives in the outer envelope layer."
-  [message request-id actual-method actual-path actual-body proxy-identity]
-  (let [env-method   (:method message)
-        env-path     (:path message)
-        env-body     (:body message)
-        env-audience (:audience message)]
-    (cond
-      (not= env-method (name actual-method))
-      {:authorized false
-       :reason (str "Signed method '" env-method
-                    "' does not match actual method '" (name actual-method) "'")}
+(defn- authorize-group
+  [token trust-roots effect domain sig-meta method path body roster proxy-identity]
+  (if-let [err (check-envelope-binding sig-meta method path body proxy-identity)]
+    {:authorized false :reason err}
+    (let [verified (sign/verify-edn sig-meta)
+          signer   (:signer verified)
+          tr-facts (trust/trust-root-facts trust-roots)
+          rl-facts (roster-facts roster)
+          ctx      (-> (pdp/context)
+                       (pdp/add-chain token {})
+                       (pdp/add-facts (into [[:chain-root (:root token)]
+                                             [:request-verified-signer signer]]
+                                            (into tr-facts rl-facts))))
+          result   (pdp/decide ctx
+                               :rules (trust-ok-rules effect domain)
+                               :policies [{:kind  :allow
+                                           :query [[:right '?name effect domain]
+                                                   [:named-key '?name '?k]
+                                                   [:request-verified-signer '?k]
+                                                   [:trusted-ok]]}])]
+      (if (:allowed? result)
+        {:authorized      true
+         :requester-bound true
+         :sdsi-group      true
+         :request-id      (:request-id verified)
+         :agent-key-fp    (agent-fingerprint signer)}
+        {:authorized false
+         :reason     (str "Agent not in any group with " (name effect)
+                          " access to " domain)}))))
 
-      (not= env-path actual-path)
-      {:authorized false
-       :reason (str "Signed path '" env-path
-                    "' does not match actual path '" actual-path "'")}
-
-      (not= env-body (or actual-body {}))
-      {:authorized false
-       :reason "Signed body does not match actual request body"}
-
-      ;; Audience check: if the envelope has an audience, it must match the proxy
-      (and env-audience proxy-identity (not= env-audience proxy-identity))
-      {:authorized false
-       :reason (str "Audience mismatch: request signed for '" env-audience
-                    "' but this proxy is '" proxy-identity "'")}
-
-      :else
-      (if-let [err (replay/check replay-guard request-id)]
-        {:authorized false :reason err}
-        nil))))
-
-(defn- roster-facts
-  "Convert a roster map into [:named-key group pk-bytes] Datalog facts.
-   Roster format: {\"traders\" [\"hex1\" \"hex2\"], \"monitors\" [\"hex3\"]}"
-  [roster]
-  (when roster
-    (into []
-          (mapcat (fn [[group-name key-hexes]]
-                    (map (fn [hex] [:named-key group-name (hex->bytes hex)])
-                         key-hexes)))
-          roster)))
-
-(defn- check-sdsi-group
-  "Evaluate a token with SDSI group-based authorization.
-   Token carries [:right group-name :effect domain].
-   Roster provides [:named-key group-name pk-bytes].
-   Datalog resolves: name→key→verified-key→authenticated-as→right."
-  [token effect domain sig-metadata actual-method actual-path actual-body roster
-   proxy-identity]
-  (let [verified (envelope/verify sig-metadata)]
-    (if-not (:valid? verified)
-      {:authorized false :reason "Request signature verification failed"}
-      (let [message    (:message verified)
-            request-id (:request-id verified)]
-        (or (verify-envelope message request-id actual-method actual-path
-                             actual-body proxy-identity)
-            (let [verified-key (:signer-key verified)
-                  name-facts   (roster-facts roster)
-                  result (sw/evaluate token
-                                      :explain? true
-                                      :authorizer
-                                      {:facts (into [[:request-verified-agent-key verified-key]]
-                                                    name-facts)
-                                       :rules [{:id   :resolve-name
-                                                :head [:authenticated-as '?name]
-                                                :body [[:named-key '?name '?k]
-                                                       [:request-verified-agent-key '?k]]}]
-                                       :policies [{:kind :allow
-                                                   :query [[:authenticated-as '?name]
-                                                           [:right '?name effect domain]]}]})]
-              (if (:valid? result)
-                {:authorized true
-                 :requester-bound true
-                 :sdsi-group true
-                 :request-id request-id
-                 :agent-key-fp (agent-key-fingerprint verified-key)}
-                {:authorized false
-                 :reason (str "Agent not in any group with " (name effect)
-                              " access to " domain)
-                 :explain (:explain result)})))))))
-
-(defn- check-requester-bound
-  "Evaluate a requester-bound token with signed request verification.
-   Verifies: signature, envelope contents match actual request,
-   freshness, and replay protection."
-  [token effect domain sig-metadata actual-method actual-path actual-body
-   proxy-identity]
-  (let [verified (envelope/verify sig-metadata)]
-    (if-not (:valid? verified)
-      {:authorized false :reason "Request signature verification failed"}
-      (let [message    (:message verified)
-            request-id (:request-id verified)]
-        (or (verify-envelope message request-id actual-method actual-path
-                             actual-body proxy-identity)
-            (let [verified-key (:signer-key verified)
-                  result (sw/evaluate token
-                                      :explain? true
-                                      :authorizer
-                                      {:facts [[:requested-effect effect]
-                                               [:requested-domain domain]
-                                               [:request-verified-agent-key verified-key]]
-                                       :rules [{:id   :agent-bound
-                                                :head [:agent-can-act '?k]
-                                                :body [[:authorized-agent-key '?k]
-                                                       [:request-verified-agent-key '?k]]}]
-                                       :checks [{:id    :check-effect
-                                                 :query [[:effect effect]]}
-                                                {:id    :check-domain
-                                                 :query [[:domain domain]]}]
-                                       :policies [{:kind :allow
-                                                   :query [[:agent-can-act '?k]]}]})]
-              (if (:valid? result)
-                {:authorized true
-                 :requester-bound true
-                 :request-id request-id
-                 :agent-key-fp (agent-key-fingerprint verified-key)}
-                {:authorized false
-                 :reason "Token not bound to this agent key"
-                 :explain (:explain result)})))))))
-
-(defn- block-facts
-  "Extract facts from a block (signed-envelope format)."
-  [block]
-  (get-in block [:envelope :message :facts]))
-
-(defn- extract-signer-key
-  "Extract [:signer-key <pk-bytes>] from the token's authority block facts.
-   Returns the public key bytes, or nil if not present."
-  [token]
-  (some (fn [fact]
-          (when (= :signer-key (first fact))
-            (second fact)))
-        (block-facts (first (:blocks token)))))
+;; ---------------------------------------------------------------------------
+;; Public entry point
+;; ---------------------------------------------------------------------------
 
 (defn verify-and-authorize
-  "Two-step verification and authorization.
-
-   Step 1 (crypto): Extract [:signer-key] from token, verify signature.
-   Step 2 (policy): Add token facts + trust-root facts + request facts
-                    to Datalog, let the join decide.
+  "Verify a capability token and authorize the request.
 
    Arguments:
-     token-str    — serialized token string (from Bearer header)
-     trust-roots  — PublicKey (single root) or {pk-bytes → {:scoped-to ...}} (multi-root)
-     request      — map with :effect, :domain, :method, :path from schema
-     sig-metadata — (optional) deserialized signature metadata
-     request-body — (optional) the EDN request body
-     opts         — (optional) {:roster ... :proxy-identity ...}
+     token-str   — serialized sealed chain (CEDN string)
+     trust-roots — kid URN string (single root)
+                   OR {kid → {:scoped-to {:effects #{} :domains #{}}}} (multi-root)
+     request     — {:effect :domain :method :path}
+     sig-meta    — (optional) signed envelope for bound/group modes
+     body        — (optional) request body
+     opts        — (optional) {:roster :proxy-identity}
 
-   Returns:
-     {:authorized true ...} or {:authorized false :reason \"...\"}."
+   Returns: {:authorized true/false ...}"
   ([token-str trust-roots request]
    (verify-and-authorize token-str trust-roots request nil nil nil))
-  ([token-str trust-roots request sig-metadata request-body]
-   (verify-and-authorize token-str trust-roots request sig-metadata request-body nil))
-  ([token-str trust-roots {:keys [effect domain method path]} sig-metadata request-body
-    {:keys [roster proxy-identity] :as _opts}]
+  ([token-str trust-roots request sig-meta body]
+   (verify-and-authorize token-str trust-roots request sig-meta body nil))
+  ([token-str trust-roots {:keys [effect domain method path]} sig-meta body
+    {:keys [roster proxy-identity]}]
    (try
-     (let [token            (deserialize-token token-str)
-           facts            (block-facts (first (:blocks token)))
-           ;; === STEP 1: Cryptographic signature verification ===
-           ;; Extract the signer's public key from the token, verify against it.
-           ;; This step knows nothing about trust — only "is the signature valid?"
-           signer-key-bytes (extract-signer-key token)
-           signer-pk        (when signer-key-bytes
-                              (sw-crypto/decode-public-key signer-key-bytes))]
+     (let [token (deserialize-token token-str)
+           facts (token-facts token)
+           mode  (token-mode facts)]
        (cond
-         (nil? signer-pk)
+         ;; Signed request required but missing
+         (and (#{:bound :group} mode) (nil? sig-meta))
          {:authorized false
-          :reason "Token missing [:signer-key] fact — cannot verify signature"}
+          :reason (str (case mode :group "Group" :bound "Bound")
+                       " token requires signed request"
+                       " (X-Agent-Signature header missing)")}
 
-         (not (sw/verify token {:public-key signer-pk}))
-         {:authorized false :reason "Token signature verification failed"}
+         ;; Group mode requires a roster
+         (and (= mode :group) (nil? roster))
+         {:authorized false
+          :reason "Group token requires roster configuration (STROOPWAFEL_ROSTER)"}
 
          :else
-           ;; === STEP 2: Policy evaluation via Datalog ===
-           ;; Token facts + trust-root facts + request facts all go into Datalog.
-           ;; The join decides: is the signer trusted for this operation?
-         (let [has-agent-key? (some #(= :authorized-agent-key (first %)) facts)
-               has-right?     (some #(= :right (first %)) facts)
-               needs-sig?     (or has-agent-key? has-right?)
-               tr-facts       (trust/trust-root-facts trust-roots)]
-           (cond
-               ;; Signed request required but not provided
-             (and needs-sig? (nil? sig-metadata))
-             {:authorized false
-              :reason (str (if has-right? "Group" "Bound")
-                           " token requires signed request"
-                           " (X-Agent-Signature header missing)")}
-
-               ;; SDSI group token but no roster
-             (and has-right? (nil? roster))
-             {:authorized false
-              :reason "Group token requires roster configuration (STROOPWAFEL_ROSTER)"}
-
-               ;; Signed request flows (SPKI or SDSI)
-             (and needs-sig? sig-metadata)
-             (do (replay/evict-expired! replay-guard)
-                 (if has-right?
-                   (check-sdsi-group token effect domain sig-metadata
-                                     method path request-body roster
-                                     proxy-identity)
-                   (check-requester-bound token effect domain sig-metadata
-                                          method path request-body
-                                          proxy-identity)))
-
-               ;; Bearer-only token
-             :else
-             (check-bearer-only token effect domain tr-facts)))))
+         (do (replay/evict-expired! replay-guard)
+             (case mode
+               :bearer (authorize-bearer token trust-roots effect domain)
+               :bound  (authorize-bound token trust-roots effect domain
+                                        sig-meta method path body proxy-identity)
+               :group  (authorize-group token trust-roots effect domain
+                                        sig-meta method path body roster
+                                        proxy-identity)))))
      (catch Exception e
        (log/log! {:level :warn :id ::auth-error
-                  :msg "Token verification error"
+                  :msg  "Token verification error"
                   :data {:error (.getMessage e)}})
        {:authorized false :reason (str "Token error: " (.getMessage e))}))))

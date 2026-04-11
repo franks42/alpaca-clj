@@ -280,17 +280,17 @@ operator account          agent-trader account         proxy account
 Agents can use existing `~/.ssh/id_ed25519` keys — no new key ceremony needed:
 
 ```clojure
-(require '[alpaca.ssh :as ssh])
+(require '[signet.ssh :as ssh]
+         '[signet.sign :as sign])
 
 ;; Load the SSH keypair that already exists
-(def agent-kp (ssh/load-ssh-keypair))  ;; reads ~/.ssh/id_ed25519{,.pub}
+(def agent-kp (ssh/load-keypair))  ;; reads ~/.ssh/id_ed25519
 
-;; Use it for request signing — works directly with stroopwafel
-(require '[stroopwafel.request :as req])
-(def signed (req/sign-request {:symbol "AAPL"} (:priv agent-kp) (:pub agent-kp)))
+;; Use it for request signing
+(def signed (sign/sign-edn agent-kp {:symbol "AAPL"} {:ttl 60}))
 ```
 
-The SSH key infrastructure that sysadmins already manage, audit, and rotate IS the capability binding infrastructure. `alpaca.ssh` converts SSH Ed25519 format to Java key objects — just fixed ASN.1 header prepends, no crypto libraries needed.
+The SSH key infrastructure that sysadmins already manage, audit, and rotate IS the capability binding infrastructure. `signet.ssh` parses the OpenSSH Ed25519 format directly — no crypto libraries, no ASN.1 tricks.
 
 **Bootstrap flow:**
 
@@ -312,44 +312,30 @@ The agent's private key **never leaves the agent's home directory**. The operato
 
 ---
 
-## PEP Pipeline and Request Canonicalization
+## Policy Enforcement and Request Canonicalization
 
-The Policy Enforcement Point is implemented as a configurable pipeline of plain functions (portable across JVM, bb, CLJS — no protocols, no macros):
+The Policy Enforcement Point is a Ring middleware in `alpaca.proxy.middleware/wrap-stroopwafel-auth`. The pipeline for each request:
 
 ```
-wire-request
-  → canonicalize     extract security-relevant facts from wire format
-  → extract-creds    extract token + signature from wire format
-  → authorize        verify token + signature + evaluate Datalog policy
-  → on-allow/on-deny
+ring-request
+  → exempt?          /health and /api bypass auth
+  → canonicalize     extract security-relevant facts from the wire request
+  → extract-creds    Bearer token + X-Agent-Signature header
+  → auth/verify-and-authorize   verify chain + envelope + Datalog policy
+  → allow → handler  |  deny → 401/403
 ```
 
-**The `canonicalize` function is the most security-critical step.** It defines the binding between the wire world (what arrived over the network) and the policy world (what the Datalog evaluator checks). If canonicalization extracts the wrong method, path, or body, the authorization decision will be wrong — even if the crypto is perfect.
+**The `canonicalize` function is the most security-critical step.** It defines the binding between the wire world (what arrived over the network) and the policy world (what the Datalog evaluator checks). If canonicalization extracts the wrong method, path, or body, the authorization decision will be wrong — even if the crypto is perfect. It lives in `alpaca.pep.http-edn` as an explicit, auditable function.
 
-This function is **application-specific** — it depends on the wire format (HTTP+EDN, HTTP+JSON, gRPC, CLI, nREPL). The PEP pipeline requires the implementor to provide it explicitly. We supply templates for common formats:
-
-```clojure
-;; alpaca-clj uses the HTTP+EDN template:
-(require '[alpaca.pep :as pep])
-(require '[alpaca.pep.http-edn :as http-edn])
-
-(pep/create-pep
-  {:canonicalize  http-edn/canonicalize   ;; Ring request → canonical envelope
-   :extract-creds http-edn/extract-creds  ;; Bearer token + X-Agent-Signature
-   :authorize     http-edn/authorize      ;; stroopwafel verify + evaluate
-   :exempt?       http-edn/exempt?        ;; /health and /api bypass auth
-   :public-key    root-public-key})
-```
-
-The canonical envelope produced by `canonicalize` is a single map that connects three things:
+The canonical envelope is a single map that connects three things:
 
 1. **What arrived** — the actual wire request (method, path, body)
 2. **What was signed** — the agent's signed envelope (compared for integrity)
 3. **What gets evaluated** — the Datalog facts (effect class, domain)
 
-If these three don't agree, the request is rejected. The canonicalization function is where that agreement is defined — and where a mistake would be most dangerous. Making it explicit and auditable is the point.
+If these three don't agree, the request is rejected.
 
-The PEP pipeline (`alpaca.pep`) is intended to move to the stroopwafel repo as a reusable enforcement framework.
+Inside `auth/verify-and-authorize`, the policy decision runs through `stroopwafel-pdp`: verify the chain, inject local facts (chain root, request-verified signer, trust roots), and evaluate one Datalog policy per auth mode (bearer / bound / group).
 
 ---
 
@@ -371,7 +357,9 @@ The PEP pipeline (`alpaca.pep`) is intended to move to the stroopwafel repo as a
 | [http-kit](https://github.com/http-kit/http-kit) | 2.8.1 | HTTP server + client |
 | [cheshire](https://github.com/dakrone/cheshire) | 6.1.0 | JSON (Alpaca REST API) |
 | [cedn](https://github.com/franks42/canonical-edn) | 1.2.0 | Canonical EDN serialization |
-| [stroopwafel](https://github.com/franks42/stroopwafel) | 0.9.0 | Capability tokens with requester binding + SDSI groups |
+| [signet](https://github.com/franks42/signet) | local | Ed25519 keys, signing, chains, SSH import |
+| [stroopwafel](https://github.com/franks42/stroopwafel) | local | Pure Datalog engine (zero deps) |
+| [stroopwafel-pdp](https://github.com/franks42/stroopwafel-pdp) | local | PDP bridge: verify chains → extract facts → evaluate |
 | [trove](https://github.com/taoensso/trove) | 1.1.0 | Structured logging |
 | [timbre](https://github.com/taoensso/timbre) | 6.8.0 | Logging backend |
 

@@ -1,21 +1,20 @@
 (ns alpaca.auth-test
-  "Tests for Stroopwafel authentication and authorization.
-   Covers bearer tokens, requester binding, replay protection,
-   envelope integrity, and effect/domain scoping."
+  "Tests for alpaca.auth — capability tokens, bearer/bound/group modes,
+   envelope binding, replay protection, and multi-root scoped trust."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string]
             [alpaca.auth :as auth]
-            [stroopwafel.crypto :as crypto]))
+            [signet.key :as key]))
 
 ;; ---------------------------------------------------------------------------
 ;; Test fixtures
 ;; ---------------------------------------------------------------------------
 
 (def root-kp (auth/generate-keypair))
-(def root-pk (:pub root-kp))
+(def root-kid (key/kid root-kp))
 
 (def agent-kp (auth/generate-keypair))
-(def agent-pk-bytes (crypto/encode-public-key (:pub agent-kp)))
+(def agent-kid (key/kid agent-kp))
 
 (def rogue-kp (auth/generate-keypair))
 
@@ -23,8 +22,9 @@
   (auth/issue-token root-kp {:effects effects :domains domains}))
 
 (defn issue-bound [effects domains]
-  (auth/issue-token root-kp {:effects effects :domains domains
-                             :agent-key agent-pk-bytes}))
+  (auth/issue-token root-kp {:effects   effects
+                             :domains   domains
+                             :agent-key agent-kid}))
 
 ;; ---------------------------------------------------------------------------
 ;; Token serialization round-trip
@@ -33,10 +33,10 @@
 (deftest token-serialize-deserialize
   (let [token-str (issue-bearer #{:read} #{"market"})
         token     (auth/deserialize-token token-str)]
-    (is (map? token))
+    (is (= :signet/chain (:type token)))
     (is (vector? (:blocks token)))
     (is (= 1 (count (:blocks token))))
-    (is (= :sealed (get-in token [:proof :type])))))
+    (is (true? (:sealed (:proof token))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Bearer token authorization
@@ -44,20 +44,20 @@
 
 (deftest bearer-read-market-allowed
   (let [token  (issue-bearer #{:read} #{"market"})
-        result (auth/verify-and-authorize token root-pk
+        result (auth/verify-and-authorize token root-kid
                                           {:effect :read :domain "market"})]
     (is (:authorized result))))
 
 (deftest bearer-wrong-effect-denied
   (let [token  (issue-bearer #{:read} #{"market"})
-        result (auth/verify-and-authorize token root-pk
+        result (auth/verify-and-authorize token root-kid
                                           {:effect :write :domain "market"})]
     (is (not (:authorized result)))
     (is (.contains (:reason result) "write"))))
 
 (deftest bearer-wrong-domain-denied
   (let [token  (issue-bearer #{:read} #{"market"})
-        result (auth/verify-and-authorize token root-pk
+        result (auth/verify-and-authorize token root-kid
                                           {:effect :read :domain "account"})]
     (is (not (:authorized result)))
     (is (.contains (:reason result) "account"))))
@@ -67,23 +67,23 @@
     (testing "all combinations allowed"
       (doseq [effect [:read :write :destroy]
               domain ["market" "account" "trade"]]
-        (let [result (auth/verify-and-authorize token root-pk
+        (let [result (auth/verify-and-authorize token root-kid
                                                 {:effect effect :domain domain})]
           (is (:authorized result)
               (str (name effect) " on " domain " should be allowed")))))))
 
 (deftest bearer-wrong-root-key-denied
-  (let [token    (issue-bearer #{:read} #{"market"})
-        wrong-kp (auth/generate-keypair)
-        result   (auth/verify-and-authorize token (:pub wrong-kp)
-                                            {:effect :read :domain "market"})]
+  (let [token     (issue-bearer #{:read} #{"market"})
+        wrong-kid (key/kid (auth/generate-keypair))
+        result    (auth/verify-and-authorize token wrong-kid
+                                             {:effect :read :domain "market"})]
     (is (not (:authorized result)))
     (is (.contains (:reason result) "not trusted"))))
 
 (deftest bearer-tampered-token-denied
   (let [token-str (issue-bearer #{:read} #{"market"})
         tampered  (clojure.string/replace token-str "market" "hacked")
-        result    (auth/verify-and-authorize tampered root-pk
+        result    (auth/verify-and-authorize tampered root-kid
                                              {:effect :read :domain "market"})]
     (is (not (:authorized result)))))
 
@@ -93,7 +93,7 @@
 
 (deftest bound-token-without-signature-denied
   (let [token  (issue-bound #{:read} #{"market"})
-        result (auth/verify-and-authorize token root-pk
+        result (auth/verify-and-authorize token root-kid
                                           {:effect :read :domain "market"})]
     (is (not (:authorized result)))
     (is (.contains (:reason result) "signed request"))))
@@ -102,7 +102,7 @@
   (let [token    (issue-bound #{:read} #{"market"})
         sig-meta (auth/sign-request :get "/market/clock" {} agent-kp)
         result   (auth/verify-and-authorize
-                  token root-pk
+                  token root-kid
                   {:effect :read :domain "market"
                    :method :get :path "/market/clock"}
                   sig-meta
@@ -114,7 +114,7 @@
   (let [token    (issue-bound #{:read} #{"market"})
         sig-meta (auth/sign-request :get "/market/clock" {} rogue-kp)
         result   (auth/verify-and-authorize
-                  token root-pk
+                  token root-kid
                   {:effect :read :domain "market"
                    :method :get :path "/market/clock"}
                   sig-meta
@@ -130,7 +130,7 @@
   (let [token    (issue-bound #{:read} #{"market"})
         sig-meta (auth/sign-request :get "/market/clock" {} agent-kp)
         result   (auth/verify-and-authorize
-                  token root-pk
+                  token root-kid
                   {:effect :read :domain "market"
                    :method :post :path "/market/clock"}
                   sig-meta
@@ -142,7 +142,7 @@
   (let [token    (issue-bound #{:read} #{"market"})
         sig-meta (auth/sign-request :get "/market/clock" {} agent-kp)
         result   (auth/verify-and-authorize
-                  token root-pk
+                  token root-kid
                   {:effect :read :domain "market"
                    :method :get :path "/market/quote"}
                   sig-meta
@@ -154,7 +154,7 @@
   (let [token    (issue-bound #{:read} #{"market"})
         sig-meta (auth/sign-request :post "/market/quote" {:symbol "AAPL"} agent-kp)
         result   (auth/verify-and-authorize
-                  token root-pk
+                  token root-kid
                   {:effect :read :domain "market"
                    :method :post :path "/market/quote"}
                   sig-meta
@@ -171,10 +171,8 @@
         sig-meta (auth/sign-request :get "/market/clock" {} agent-kp)
         req      {:effect :read :domain "market"
                   :method :get :path "/market/clock"}
-        ;; First request — should pass
-        result1  (auth/verify-and-authorize token root-pk req sig-meta {})
-        ;; Replay — same sig-meta — should fail
-        result2  (auth/verify-and-authorize token root-pk req sig-meta {})]
+        result1  (auth/verify-and-authorize token root-kid req sig-meta {})
+        result2  (auth/verify-and-authorize token root-kid req sig-meta {})]
     (is (:authorized result1) "First request should pass")
     (is (not (:authorized result2)) "Replay should be denied")
     (is (.contains (:reason result2) "Replay"))))
@@ -184,10 +182,10 @@
         req     {:effect :read :domain "market"
                  :method :get :path "/market/clock"}
         result1 (auth/verify-and-authorize
-                 token root-pk req
+                 token root-kid req
                  (auth/sign-request :get "/market/clock" {} agent-kp) {})
         result2 (auth/verify-and-authorize
-                 token root-pk req
+                 token root-kid req
                  (auth/sign-request :get "/market/clock" {} agent-kp) {})]
     (is (:authorized result1))
     (is (:authorized result2))))
@@ -200,7 +198,7 @@
   (let [token    (issue-bound #{:read} #{"market"})
         sig-meta (auth/sign-request :get "/market/clock" {} agent-kp "proxy-a:8080")
         result   (auth/verify-and-authorize
-                  token root-pk
+                  token root-kid
                   {:effect :read :domain "market" :method :get :path "/market/clock"}
                   sig-meta {} {:proxy-identity "proxy-a:8080"})]
     (is (:authorized result))))
@@ -209,7 +207,7 @@
   (let [token    (issue-bound #{:read} #{"market"})
         sig-meta (auth/sign-request :get "/market/clock" {} agent-kp "proxy-a:8080")
         result   (auth/verify-and-authorize
-                  token root-pk
+                  token root-kid
                   {:effect :read :domain "market" :method :get :path "/market/clock"}
                   sig-meta {} {:proxy-identity "proxy-b:9090"})]
     (is (not (:authorized result)))
@@ -220,36 +218,24 @@
     (let [token    (issue-bound #{:read} #{"market"})
           sig-meta (auth/sign-request :get "/market/clock" {} agent-kp)
           result   (auth/verify-and-authorize
-                    token root-pk
+                    token root-kid
                     {:effect :read :domain "market" :method :get :path "/market/clock"}
                     sig-meta {} {})]
       (is (:authorized result)))))
-
-;; ---------------------------------------------------------------------------
-;; Hex utilities
-;; ---------------------------------------------------------------------------
-
-(deftest hex-round-trip
-  (let [original (byte-array [0 1 127 -128 -1 42])
-        hex      (auth/bytes->hex original)
-        back     (auth/hex->bytes hex)]
-    (is (= (seq original) (seq back)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Multi-root scoped trust
 ;; ---------------------------------------------------------------------------
 
 (def authority-b-kp (auth/generate-keypair))
-(def authority-b-pk-bytes (crypto/encode-public-key (:pub authority-b-kp)))
+(def authority-b-kid (key/kid authority-b-kp))
 
 (defn issue-bearer-with [kp effects domains]
   (auth/issue-token kp {:effects effects :domains domains}))
 
 (defn multi-root-config []
-  {(crypto/encode-public-key (:pub root-kp))
-   {:scoped-to {:effects #{:read} :domains #{"market"}}}
-   authority-b-pk-bytes
-   {:scoped-to {:effects #{:write :destroy} :domains #{"trade"}}}})
+  {root-kid          {:scoped-to {:effects #{:read} :domains #{"market"}}}
+   authority-b-kid   {:scoped-to {:effects #{:write :destroy} :domains #{"trade"}}}})
 
 (deftest multi-root-authority-a-in-scope
   (let [token  (issue-bearer-with root-kp #{:read} #{"market"})
@@ -290,12 +276,11 @@
 ;; ---------------------------------------------------------------------------
 
 (def agent2-kp (auth/generate-keypair))
-(def agent2-pk-bytes (crypto/encode-public-key (:pub agent2-kp)))
+(def agent2-kid (key/kid agent2-kp))
 
 (def test-roster
-  {"traders"  [(auth/bytes->hex agent-pk-bytes)
-               (auth/bytes->hex agent2-pk-bytes)]
-   "monitors" [(auth/bytes->hex agent-pk-bytes)]})
+  {"traders"  [agent-kid agent2-kid]
+   "monitors" [agent-kid]})
 
 (defn issue-group [rights]
   (auth/issue-group-token root-kp {:rights rights}))
@@ -309,7 +294,7 @@
                 :method :get :path "/market/clock"}
         sig    (make-sig-meta :get "/market/clock" {} agent-kp)
         result (auth/verify-and-authorize
-                token root-pk req sig {} {:roster test-roster})]
+                token root-kid req sig {} {:roster test-roster})]
     (is (:authorized result))
     (is (:sdsi-group result))))
 
@@ -319,7 +304,7 @@
                 :method :get :path "/market/clock"}
         sig    (make-sig-meta :get "/market/clock" {} agent2-kp)
         result (auth/verify-and-authorize
-                token root-pk req sig {} {:roster test-roster})]
+                token root-kid req sig {} {:roster test-roster})]
     (is (:authorized result))
     (is (:sdsi-group result))))
 
@@ -329,7 +314,7 @@
                 :method :get :path "/market/clock"}
         sig    (make-sig-meta :get "/market/clock" {} rogue-kp)
         result (auth/verify-and-authorize
-                token root-pk req sig {} {:roster test-roster})]
+                token root-kid req sig {} {:roster test-roster})]
     (is (not (:authorized result)))
     (is (.contains (:reason result) "not in any group"))))
 
@@ -339,7 +324,7 @@
                 :method :post :path "/market/quote"}
         sig    (make-sig-meta :post "/market/quote" {:symbol "AAPL"} agent-kp)
         result (auth/verify-and-authorize
-                token root-pk req sig {:symbol "AAPL"} {:roster test-roster})]
+                token root-kid req sig {:symbol "AAPL"} {:roster test-roster})]
     (is (not (:authorized result)))))
 
 (deftest sdsi-wrong-domain-denied
@@ -348,7 +333,7 @@
                 :method :get :path "/account/info"}
         sig    (make-sig-meta :get "/account/info" {} agent-kp)
         result (auth/verify-and-authorize
-                token root-pk req sig {} {:roster test-roster})]
+                token root-kid req sig {} {:roster test-roster})]
     (is (not (:authorized result)))))
 
 (deftest sdsi-multiple-rights
@@ -361,13 +346,13 @@
     (testing "read market allowed"
       (let [sig (make-sig-meta :get "/market/clock" {} agent-kp)
             r   (auth/verify-and-authorize
-                 token root-pk req1 sig {} {:roster test-roster})]
+                 token root-kid req1 sig {} {:roster test-roster})]
         (is (:authorized r))))
     (testing "write trade allowed"
       (let [sig (make-sig-meta :post "/trade/place-order"
                                {:symbol "AAPL" :side "buy"} agent-kp)
             r   (auth/verify-and-authorize
-                 token root-pk req2 sig {:symbol "AAPL" :side "buy"}
+                 token root-kid req2 sig {:symbol "AAPL" :side "buy"}
                  {:roster test-roster})]
         (is (:authorized r))))))
 
@@ -376,31 +361,29 @@
         req    {:effect :read :domain "market"
                 :method :get :path "/market/clock"}
         sig    (make-sig-meta :get "/market/clock" {} agent-kp)
-        result (auth/verify-and-authorize token root-pk req sig {})]
+        result (auth/verify-and-authorize token root-kid req sig {})]
     (is (not (:authorized result)))
     (is (.contains (:reason result) "roster"))))
 
 (deftest sdsi-no-signature-returns-error
   (let [token  (issue-group [["traders" :read "market"]])
         result (auth/verify-and-authorize
-                token root-pk {:effect :read :domain "market"})]
+                token root-kid {:effect :read :domain "market"})]
     (is (not (:authorized result)))
     (is (.contains (:reason result) "signed request"))))
 
 (deftest sdsi-monitors-group-separate
   (testing "agent1 is in monitors, agent2 is not"
     (let [token (issue-group [["monitors" :read "account"]])]
-      ;; agent1 in monitors → allowed
       (let [sig (make-sig-meta :get "/account/info" {} agent-kp)
             r   (auth/verify-and-authorize
-                 token root-pk
+                 token root-kid
                  {:effect :read :domain "account" :method :get :path "/account/info"}
                  sig {} {:roster test-roster})]
         (is (:authorized r)))
-      ;; agent2 NOT in monitors → denied
       (let [sig (make-sig-meta :get "/account/info" {} agent2-kp)
             r   (auth/verify-and-authorize
-                 token root-pk
+                 token root-kid
                  {:effect :read :domain "account" :method :get :path "/account/info"}
                  sig {} {:roster test-roster})]
         (is (not (:authorized r)))))))

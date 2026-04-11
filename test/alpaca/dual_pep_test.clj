@@ -1,8 +1,6 @@
 (ns alpaca.dual-pep-test
   "Integration tests for the dual-PEP architecture.
 
-   Demonstrates two independent trust chains working together:
-
    Company A (outbound)              Company B (inbound)
    ════════════════════              ═══════════════════
    ┌──────────────┐                 ┌──────────────┐
@@ -14,45 +12,31 @@
    ┌──────────────┐                 ┌──────────────┐
    │ Outbound     │                 │ Inbound      │
    │ Token        │                 │ Token        │
-   │              │                 │              │
-   │ destinations │                 │ effects      │
-   │ permissions  │                 │ domains      │
-   │ restrictions │                 │ agent-key    │
    └──────┬───────┘                 └──────┬───────┘
-          │                                │
-          ▼              signed            ▼
-   ┌──────────────┐     envelope    ┌──────────────┐
-   │ Client PEP   │ ────────────►  │ Server PEP   │
-   │ (agent-side) │  + audience    │ (proxy-side) │
-   │              │                │              │
-   │ deny → stop  │                │ deny → 403   │
-   └──────────────┘                └──────┬───────┘
-                                          │
-                                          ▼
-                                     Alpaca Markets
+          │              signed            │
+          ▼              envelope          ▼
+   ┌──────────────┐ ────────────►  ┌──────────────┐
+   │ Client PEP   │  + audience    │ Server PEP   │
+   └──────────────┘                └──────────────┘
 
-   Every test creates BOTH tokens, then exercises the full chain.
-   No server required — all pure function calls."
+   Every test creates BOTH tokens, then exercises the full chain."
   (:require [clojure.test :refer [deftest is testing]]
             [alpaca.client-pep :as cpep]
             [alpaca.auth :as auth]
-            [stroopwafel.crypto :as crypto]))
+            [signet.key :as key]))
 
 ;; ---------------------------------------------------------------------------
 ;; Two companies, two authorities, one agent
 ;; ---------------------------------------------------------------------------
 
-;; Company A — the agent's organization (outbound policy)
-(def company-a-kp (auth/generate-keypair))
-(def company-a-pub (:pub company-a-kp))
+(def company-a-kp  (auth/generate-keypair))
+(def company-a-kid (key/kid company-a-kp))
 
-;; Company B — the resource owner (inbound policy)
-(def company-b-kp (auth/generate-keypair))
-(def company-b-pub (:pub company-b-kp))
+(def company-b-kp  (auth/generate-keypair))
+(def company-b-kid (key/kid company-b-kp))
 
-;; The agent (works for Company A, accesses Company B's proxy)
-(def agent-kp (auth/generate-keypair))
-(def agent-pk-bytes (crypto/encode-public-key (:pub agent-kp)))
+(def agent-kp  (auth/generate-keypair))
+(def agent-kid (key/kid agent-kp))
 
 (def proxy-b-identity "proxy-b:8080")
 
@@ -61,7 +45,6 @@
 ;; ---------------------------------------------------------------------------
 
 (def outbound-token
-  "Company A says: agent may read market data from proxy-b, no PII."
   (cpep/issue-outbound-token
    company-a-kp
    {:destinations [proxy-b-identity]
@@ -69,26 +52,20 @@
     :restrictions #{:no-pii-in-params}}))
 
 (def inbound-token
-  "Company B says: this agent may read market data (bound to agent key)."
   (auth/issue-token
    company-b-kp
    {:effects   #{:read}
     :domains   #{"market"}
-    :agent-key agent-pk-bytes}))
+    :agent-key agent-kid}))
 
 ;; ---------------------------------------------------------------------------
 ;; Helper: full dual-PEP flow
 ;; ---------------------------------------------------------------------------
 
 (defn dual-pep-flow
-  "Simulate the full dual-PEP flow:
-   1. Client PEP checks outbound policy
-   2. If allowed, agent signs request with audience
-   3. Server PEP verifies inbound policy
-   Returns {:client-result ... :server-result ...}"
   [{:keys [destination effect domain method path body audience]}]
   (let [client-result (cpep/check-outbound
-                       outbound-token company-a-pub
+                       outbound-token company-a-kid
                        {:destination destination
                         :effect effect :domain domain
                         :body body})]
@@ -96,7 +73,7 @@
       {:client-result client-result :server-result nil}
       (let [sig-meta      (auth/sign-request method path body agent-kp audience)
             server-result (auth/verify-and-authorize
-                           inbound-token company-b-pub
+                           inbound-token company-b-kid
                            {:effect effect :domain domain
                             :method method :path path}
                            sig-meta body
@@ -156,12 +133,11 @@
 
 (deftest server-pep-blocks-wrong-effect
   (testing "Server PEP denies even if client PEP is bypassed"
-    (let [;; Agent bypasses client PEP and signs a write request directly
-          sig-meta      (auth/sign-request :post "/trade/place-order"
+    (let [sig-meta      (auth/sign-request :post "/trade/place-order"
                                            {:symbol "AAPL" :side "buy"}
                                            agent-kp proxy-b-identity)
           server-result (auth/verify-and-authorize
-                         inbound-token company-b-pub
+                         inbound-token company-b-kid
                          {:effect :write :domain "trade"
                           :method :post :path "/trade/place-order"}
                          sig-meta {:symbol "AAPL" :side "buy"}
@@ -175,7 +151,7 @@
                                            {:symbol "AAPL"}
                                            agent-kp proxy-b-identity)
           server-result (auth/verify-and-authorize
-                         inbound-token company-b-pub
+                         inbound-token company-b-kid
                          {:effect :read :domain "market"
                           :method :post :path "/market/quote"}
                          sig-meta {:symbol "AAPL"}
@@ -185,21 +161,20 @@
 
 (deftest independent-authorities-cannot-forge
   (testing "Swapping authority keys causes both PEPs to reject"
-    ;; Outbound token verified with B's key (wrong) → fails
+    ;; Outbound token verified against B's kid (wrong) → fails
     (let [result (cpep/check-outbound
-                  outbound-token company-b-pub
+                  outbound-token company-b-kid
                   {:destination proxy-b-identity
                    :effect :read :domain "market"
                    :body {:symbol "AAPL"}})]
       (is (not (:allowed result)))
       (is (.contains (:reason result) "not signed by trusted")))
 
-    ;; Bearer inbound token verified with A's key (wrong) → fails
-    ;; (trust root mismatch — B signed it, A's key presented as trust root)
+    ;; Bearer inbound token verified against A's kid (wrong) → fails
     (let [bearer-token (auth/issue-token company-b-kp
                                          {:effects #{:read} :domains #{"market"}})
           result       (auth/verify-and-authorize
-                        bearer-token company-a-pub
+                        bearer-token company-a-kid
                         {:effect :read :domain "market"})]
       (is (not (:authorized result)))
       (is (.contains (:reason result) "not trusted")))))
