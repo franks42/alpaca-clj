@@ -1,25 +1,33 @@
 (ns alpaca.auth
   "Token authentication and authorization for the alpaca-clj proxy.
 
-   Three authorization modes, dispatched by token shape:
+   Four authorization modes, dispatched by token shape:
 
+   Chain-shaped tokens (:type :signet/chain):
      :bearer  — token carries [:effect ...] and [:domain ...] facts
      :bound   — token also carries [:authorized-agent-key <kid>]
                 (requires a signed request envelope)
      :group   — token carries [:right <group> <effect> <domain>]
                 (requires a signed envelope + a named-key roster)
 
-   All three modes use the same machinery:
-     - signet.chain        — capability chain tokens
-     - signet.sign         — per-request envelope signing
-     - stroopwafel.pdp     — PDP bridge (verifies, extracts facts, evaluates)
-     - stroopwafel.core    — Datalog engine (via pdp/decide)"
+   Assertion-block tokens (:type :signet/signed):
+     :spki    — the token IS a signed assertion block containing
+                :name-binding + :capability assertions (+ optional
+                :delegation and :revocation). Authorization is done
+                via Datalog join over the SDSI name resolution
+                templates. Requires a signed request envelope.
+
+   Chain modes use signet.chain + stroopwafel.pdp.
+   :spki mode uses signet.sign + stroopwafel.pdp.spki.core."
   (:require [signet.chain :as chain]
             [signet.key :as key]
             [signet.sign :as sign]
             [stroopwafel.pdp.core :as pdp]
             [stroopwafel.pdp.trust :as trust]
             [stroopwafel.pdp.replay :as replay]
+            [stroopwafel.pdp.spki.core :as spki]
+            [stroopwafel.pdp.spki.assertion :as spki-a]
+            [stroopwafel.pdp.spki.templates :as spki-t]
             [cedn.core :as cedn] ;; cedn/readers used at runtime
             [clojure.edn :as edn]
             [taoensso.trove :as log]))
@@ -70,6 +78,38 @@
         token        (-> (chain/extend root-kp {:facts facts})
                          (chain/close))]
     (serialize-token token)))
+
+(defn issue-assertion-block
+  "Issue an SPKI/SDSI-style assertion block (Phase 6 dogfood).
+
+   Produces a single signed block containing:
+     - one :name-binding assertion:  [:name-binding agent-kid subject-name]
+     - N :capability assertions:     [:capability subject-name effect domain]
+       (one per effect × domain pair)
+
+   Arguments:
+     root-kp — signet Ed25519 keypair (the trust anchor)
+     grants  — map:
+       :subject     — string name for the subject (e.g. \"alice\")
+       :agent-key   — kid URN of the agent who'll sign requests
+       :effects     — set of effects #{:read :write :destroy}
+       :domains     — set of domains #{\"market\" \"account\" \"trade\"}
+       :not-after   — optional epoch-ms or :forever (default infinity)
+
+   Returns: sealed signed block serialized as a CEDN string, suitable
+   for use as a Bearer token."
+  [root-kp {:keys [subject agent-key effects domains not-after]}]
+  (when-not (and subject agent-key)
+    (throw (ex-info "issue-assertion-block requires :subject and :agent-key"
+                    {:got {:subject subject :agent-key agent-key}})))
+  (let [binding     (spki-a/assertion :name-binding [agent-key subject])
+        capabilities (for [e effects d domains]
+                       (spki-a/assertion :capability [subject e d]))
+        block       (spki-a/sign-block
+                     root-kp
+                     (cond-> {:assertions (into [binding] capabilities)}
+                       not-after (assoc :not-after not-after)))]
+    (serialize-token block)))
 
 (defn issue-group-token
   "Issue an SDSI group-based token.
@@ -178,6 +218,27 @@
     (some #(= :right (first %)) facts)                :group
     (some #(= :authorized-agent-key (first %)) facts) :bound
     :else                                             :bearer))
+
+(defn- token-kind
+  "Distinguish a chain-shaped token from an SPKI assertion block."
+  [token]
+  (case (:type token)
+    :signet/chain  :chain
+    :signet/signed :spki
+    :unknown))
+
+(defn- extract-primordial-kids
+  "Normalize alpaca's trust-roots value (string / scoped map / set)
+   into the flat set of kid URNs that spki.core/add-trust-roots
+   accepts as primordial trust. Scoping metadata is dropped — SPKI
+   expresses scope inside assertions rather than in trust roots."
+  [trust-roots]
+  (cond
+    (string? trust-roots) #{trust-roots}
+    (map? trust-roots)    (set (keys trust-roots))
+    (set? trust-roots)    trust-roots
+    (sequential? trust-roots) (set trust-roots)
+    :else #{}))
 
 ;; ---------------------------------------------------------------------------
 ;; Authorizer ingredients
@@ -294,6 +355,57 @@
          :reason     (str "Agent not in any group with " (name effect)
                           " access to " domain)}))))
 
+(defn- authorize-spki
+  "Authorize an SPKI/SDSI assertion-block token.
+
+   The block is fed directly into stroopwafel.pdp.spki/add-assertions.
+   A user rule expresses SDSI name resolution: the request signer's
+   kid is joined to a :name-binding assertion for the subject name,
+   which is joined to a :capability assertion granting the requested
+   effect+domain.
+
+   Trust policy in one rule:
+     [:request-verified-signer ?signer]   ← injected from envelope
+     ∧ [:named ?signer ?subject]          ← from :name-binding template
+     ∧ [:can ?subject effect domain]      ← from :capability template
+     → [:authorized-via-name ?signer]
+
+   All verification (block signatures, trust closure, temporal,
+   revocation) is done inside spki.core/decide. This function's only
+   responsibility is envelope binding + building the context."
+  [block trust-roots effect domain sig-meta method path body proxy-identity]
+  (if-let [err (check-envelope-binding sig-meta method path body proxy-identity)]
+    {:authorized false :reason err}
+    (let [verified (sign/verify-edn sig-meta)
+          signer   (:signer verified)
+          kids     (extract-primordial-kids trust-roots)
+          rule     '{:id   :authorized-via-name
+                     :head [:authorized-via-name ?signer]
+                     :body [[:request-verified-signer ?signer]
+                            [:named ?signer ?subject]
+                            [:can ?subject ?e ?d]]}
+          ctx      (-> (spki/context)
+                       (spki/add-trust-roots kids)
+                       (spki/with-templates spki-t/standard)
+                       (spki/add-assertions block)
+                       (spki/add-facts [[:request-verified-signer signer]])
+                       (spki/add-rules [rule]))
+          result   (spki/decide
+                    ctx
+                    :policies [{:kind :allow
+                                :query [[:authorized-via-name signer]
+                                        [:can '?subject effect domain]
+                                        [:named signer '?subject]]}])]
+      (if (:allowed? result)
+        {:authorized      true
+         :requester-bound true
+         :spki            true
+         :request-id      (:request-id verified)
+         :agent-key-fp    (agent-fingerprint signer)}
+        {:authorized false
+         :reason     (str "SPKI: agent not granted " (name effect)
+                          " access to " domain)}))))
+
 ;; ---------------------------------------------------------------------------
 ;; Public entry point
 ;; ---------------------------------------------------------------------------
@@ -319,30 +431,46 @@
     {:keys [roster proxy-identity]}]
    (try
      (let [token (deserialize-token token-str)
-           facts (token-facts token)
-           mode  (token-mode facts)]
-       (cond
-         ;; Signed request required but missing
-         (and (#{:bound :group} mode) (nil? sig-meta))
-         {:authorized false
-          :reason (str (case mode :group "Group" :bound "Bound")
-                       " token requires signed request"
-                       " (X-Agent-Signature header missing)")}
+           kind  (token-kind token)]
+       (case kind
+         ;; ── SPKI assertion block ──────────────────────────────────
+         :spki
+         (cond
+           (nil? sig-meta)
+           {:authorized false
+            :reason "SPKI block requires signed request (X-Agent-Signature header missing)"}
+           :else
+           (do (replay/evict-expired! replay-guard)
+               (authorize-spki token trust-roots effect domain
+                               sig-meta method path body proxy-identity)))
 
-         ;; Group mode requires a roster
-         (and (= mode :group) (nil? roster))
-         {:authorized false
-          :reason "Group token requires roster configuration (STROOPWAFEL_ROSTER)"}
+         ;; ── Chain-shaped token (bearer / bound / group) ───────────
+         :chain
+         (let [facts (token-facts token)
+               mode  (token-mode facts)]
+           (cond
+             (and (#{:bound :group} mode) (nil? sig-meta))
+             {:authorized false
+              :reason (str (case mode :group "Group" :bound "Bound")
+                           " token requires signed request"
+                           " (X-Agent-Signature header missing)")}
 
-         :else
-         (do (replay/evict-expired! replay-guard)
-             (case mode
-               :bearer (authorize-bearer token trust-roots effect domain)
-               :bound  (authorize-bound token trust-roots effect domain
-                                        sig-meta method path body proxy-identity)
-               :group  (authorize-group token trust-roots effect domain
-                                        sig-meta method path body roster
-                                        proxy-identity)))))
+             (and (= mode :group) (nil? roster))
+             {:authorized false
+              :reason "Group token requires roster configuration (STROOPWAFEL_ROSTER)"}
+
+             :else
+             (do (replay/evict-expired! replay-guard)
+                 (case mode
+                   :bearer (authorize-bearer token trust-roots effect domain)
+                   :bound  (authorize-bound token trust-roots effect domain
+                                            sig-meta method path body proxy-identity)
+                   :group  (authorize-group token trust-roots effect domain
+                                            sig-meta method path body roster
+                                            proxy-identity)))))
+
+         :unknown
+         {:authorized false :reason "Unrecognized token format"}))
      (catch Exception e
        (log/log! {:level :warn :id ::auth-error
                   :msg  "Token verification error"

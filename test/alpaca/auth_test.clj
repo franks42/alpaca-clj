@@ -372,6 +372,148 @@
     (is (not (:authorized result)))
     (is (.contains (:reason result) "signed request"))))
 
+;; ---------------------------------------------------------------------------
+;; SPKI/SDSI assertion-block mode (Phase 6)
+;; ---------------------------------------------------------------------------
+
+(defn- issue-spki-block
+  [kp opts]
+  (auth/issue-assertion-block kp opts))
+
+(deftest spki-happy-path
+  (let [block (issue-spki-block root-kp
+                                {:subject   "alice"
+                                 :agent-key agent-kid
+                                 :effects   #{:read}
+                                 :domains   #{"market"}})
+        sig   (auth/sign-request :get "/market/clock" {} agent-kp)
+        r     (auth/verify-and-authorize
+               block root-kid
+               {:effect :read :domain "market"
+                :method :get :path "/market/clock"}
+               sig {})]
+    (is (:authorized r))
+    (is (:spki r))
+    (is (:requester-bound r))))
+
+(deftest spki-requires-signed-request
+  (let [block (issue-spki-block root-kp
+                                {:subject "alice" :agent-key agent-kid
+                                 :effects #{:read} :domains #{"market"}})
+        r     (auth/verify-and-authorize
+               block root-kid {:effect :read :domain "market"})]
+    (is (not (:authorized r)))
+    (is (.contains (:reason r) "signed request"))))
+
+(deftest spki-rogue-agent-signature-denied
+  (let [block (issue-spki-block root-kp
+                                {:subject "alice" :agent-key agent-kid
+                                 :effects #{:read} :domains #{"market"}})
+        sig   (auth/sign-request :get "/market/clock" {} rogue-kp)
+        r     (auth/verify-and-authorize
+               block root-kid
+               {:effect :read :domain "market"
+                :method :get :path "/market/clock"}
+               sig {})]
+    (is (not (:authorized r)))))
+
+(deftest spki-wrong-effect-denied
+  (let [block (issue-spki-block root-kp
+                                {:subject "alice" :agent-key agent-kid
+                                 :effects #{:read} :domains #{"market"}})
+        sig   (auth/sign-request :post "/market/quote" {} agent-kp)
+        r     (auth/verify-and-authorize
+               block root-kid
+               {:effect :write :domain "market"
+                :method :post :path "/market/quote"}
+               sig {})]
+    (is (not (:authorized r)))
+    (is (.contains (:reason r) "write"))))
+
+(deftest spki-wrong-domain-denied
+  (let [block (issue-spki-block root-kp
+                                {:subject "alice" :agent-key agent-kid
+                                 :effects #{:read} :domains #{"market"}})
+        sig   (auth/sign-request :get "/account/info" {} agent-kp)
+        r     (auth/verify-and-authorize
+               block root-kid
+               {:effect :read :domain "account"
+                :method :get :path "/account/info"}
+               sig {})]
+    (is (not (:authorized r)))
+    (is (.contains (:reason r) "account"))))
+
+(deftest spki-untrusted-root-denied
+  (let [block     (issue-spki-block root-kp
+                                    {:subject "alice" :agent-key agent-kid
+                                     :effects #{:read} :domains #{"market"}})
+        sig       (auth/sign-request :get "/market/clock" {} agent-kp)
+        wrong-kid (key/kid (auth/generate-keypair))
+        r         (auth/verify-and-authorize
+                   block wrong-kid
+                   {:effect :read :domain "market"
+                    :method :get :path "/market/clock"}
+                   sig {})]
+    (is (not (:authorized r)))))
+
+(deftest spki-multiple-effects-and-domains
+  (testing "issue-assertion-block produces one capability per effect × domain"
+    (let [block (issue-spki-block root-kp
+                                  {:subject   "alice"
+                                   :agent-key agent-kid
+                                   :effects   #{:read :write}
+                                   :domains   #{"market" "trade"}})]
+      (doseq [effect [:read :write]
+              domain ["market" "trade"]]
+        (let [sig (auth/sign-request :post "/x" {} agent-kp)
+              r   (auth/verify-and-authorize
+                   block root-kid
+                   {:effect effect :domain domain
+                    :method :post :path "/x"}
+                   sig {})]
+          (is (:authorized r)
+              (str (name effect) " on " domain " should be allowed")))))))
+
+(deftest spki-tampered-block-denied
+  (let [block     (issue-spki-block root-kp
+                                    {:subject "alice" :agent-key agent-kid
+                                     :effects #{:read} :domains #{"market"}})
+        tampered  (clojure.string/replace block "market" "hacked")
+        sig       (auth/sign-request :get "/market/clock" {} agent-kp)
+        r         (auth/verify-and-authorize
+                   tampered root-kid
+                   {:effect :read :domain "market"
+                    :method :get :path "/market/clock"}
+                   sig {})]
+    (is (not (:authorized r)))))
+
+(deftest spki-replay-denied
+  (let [block (issue-spki-block root-kp
+                                {:subject "alice" :agent-key agent-kid
+                                 :effects #{:read} :domains #{"market"}})
+        sig   (auth/sign-request :get "/market/clock" {} agent-kp)
+        req   {:effect :read :domain "market"
+               :method :get :path "/market/clock"}
+        r1    (auth/verify-and-authorize block root-kid req sig {})
+        r2    (auth/verify-and-authorize block root-kid req sig {})]
+    (is (:authorized r1) "First call passes")
+    (is (not (:authorized r2)) "Replay is denied")
+    (is (.contains (:reason r2) "Replay"))))
+
+(deftest spki-envelope-binding-mismatch
+  (testing "agent signs one path, server sees a different one → deny"
+    (let [block (issue-spki-block root-kp
+                                  {:subject "alice" :agent-key agent-kid
+                                   :effects #{:read} :domains #{"market"}})
+          sig   (auth/sign-request :get "/market/clock" {} agent-kp)
+          r     (auth/verify-and-authorize
+                 block root-kid
+                 {:effect :read :domain "market"
+                  :method :get :path "/market/bars"}   ; different path
+                 sig {})]
+      (is (not (:authorized r)))
+      (is (.contains (:reason r) "path")))))
+
 (deftest sdsi-monitors-group-separate
   (testing "agent1 is in monitors, agent2 is not"
     (let [token (issue-group [["monitors" :read "account"]])]
